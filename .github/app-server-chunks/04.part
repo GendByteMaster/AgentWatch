@@ -1,0 +1,150 @@
+            let command = item
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown command");
+            let status = item.get("status").and_then(Value::as_str).unwrap_or_default();
+            let kind = if started {
+                "tool.shell.started"
+            } else if status == "completed" {
+                "tool.shell.completed"
+            } else {
+                "tool.shell.failed"
+            };
+            let exit_code = item
+                .get("exitCode")
+                .and_then(Value::as_i64)
+                .and_then(|code| i32::try_from(code).ok());
+            session::record_agent_lifecycle(
+                root,
+                kind,
+                run_id,
+                PROVIDER,
+                None,
+                command,
+                exit_code,
+                None,
+                command_risk(root, command)?,
+            )?;
+        }
+        "fileChange" => {
+            let status = item.get("status").and_then(Value::as_str).unwrap_or_default();
+            let kind = if started {
+                "tool.file.started"
+            } else if status == "completed" {
+                "tool.file.completed"
+            } else {
+                "tool.file.failed"
+            };
+            let paths = file_change_paths(item);
+            if started {
+                state.pending_file_paths.insert(item_id.to_owned(), paths.clone());
+            } else {
+                state.pending_file_paths.remove(item_id);
+            }
+            for path in paths {
+                session::record_agent_lifecycle(
+                    root,
+                    kind,
+                    run_id,
+                    PROVIDER,
+                    None,
+                    &path,
+                    None,
+                    None,
+                    path_risk(root, &path)?,
+                )?;
+            }
+        }
+        "mcpToolCall" => {
+            let status = item.get("status").and_then(Value::as_str).unwrap_or_default();
+            let kind = if started {
+                "tool.mcp.started"
+            } else if status == "completed" {
+                "tool.mcp.completed"
+            } else {
+                "tool.mcp.failed"
+            };
+            let server = item.get("server").and_then(Value::as_str).unwrap_or("mcp");
+            let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
+            session::record_agent_lifecycle(
+                root,
+                kind,
+                run_id,
+                PROVIDER,
+                None,
+                &format!("{server}/{tool}"),
+                None,
+                None,
+                None,
+            )?;
+        }
+        "webSearch" => {
+            let kind = if started {
+                "tool.web.started"
+            } else {
+                "tool.web.completed"
+            };
+            let query = item.get("query").and_then(Value::as_str).unwrap_or("web search");
+            session::record_agent_lifecycle(
+                root, kind, run_id, PROVIDER, None, query, None, None, None,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+
+fn file_change_paths(item: &Value) -> Vec<String> {
+    item.get("changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|change| change.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect()
+}
+
+fn command_risk(root: &Path, command: &str) -> Result<Option<String>> {
+    let evaluation = policy::evaluate_command(root, &[command.to_owned()])?;
+    Ok(risk_from_evaluation(evaluation))
+}
+
+fn path_risk(root: &Path, path: &str) -> Result<Option<String>> {
+    let evaluation = policy::evaluate_path(root, Path::new(path))?;
+    Ok(risk_from_evaluation(evaluation))
+}
+
+fn risk_from_evaluation(evaluation: policy::Evaluation) -> Option<String> {
+    match evaluation.decision {
+        Decision::Warn | Decision::Deny => Some(format!(
+            "{}:{}",
+            evaluation.decision.label(),
+            evaluation.matched_rule.as_deref().unwrap_or("policy")
+        )),
+        Decision::Allow => None,
+    }
+}
+
+fn approval_gate_decision(
+    root: &Path,
+    run_id: &str,
+    tool_name: &str,
+    tool_use_id: &str,
+    tool_input: Value,
+) -> Result<bool> {
+    let executable = env::current_exe().context("failed to resolve AgentWatch executable")?;
+    let mut child = Command::new(executable)
+        .arg("approval-hook")
+        .env("AGENTWATCH_ROOT", canonical_root(root))
+        .env("AGENTWATCH_RUN_ID", run_id)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("failed to start AgentWatch approval gate")?;
+
+    let input = json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_use_id": tool_use_id,
