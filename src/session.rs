@@ -118,6 +118,45 @@ pub fn record_file(root: &Path, kind: impl Into<String>, path: &Path) -> Result<
     )
 }
 
+pub fn record_agent_file(
+    root: &Path,
+    run_id: &str,
+    provider: &str,
+    change: &str,
+    path: &Path,
+) -> Result<()> {
+    if !is_active(root)? {
+        return Ok(());
+    }
+
+    let evaluation = policy::evaluate_path(root, path)?;
+    let risk = match evaluation.decision {
+        Decision::Warn | Decision::Deny => Some(format!(
+            "{}:{}",
+            evaluation.decision.label(),
+            evaluation.matched_rule.as_deref().unwrap_or("policy")
+        )),
+        Decision::Allow => None,
+    };
+
+    append_event(
+        root,
+        SessionEvent {
+            id: event_id(),
+            timestamp: Utc::now(),
+            kind: format!("agent.file.{change}"),
+            path: Some(path.to_path_buf()),
+            risk,
+            command: None,
+            exit_code: None,
+            provider: Some(provider.to_owned()),
+            model: None,
+            run_id: Some(run_id.to_owned()),
+            duration_ms: None,
+        },
+    )
+}
+
 pub fn record_command(
     root: &Path,
     command: String,
@@ -337,7 +376,7 @@ fn diff_stats(root: &Path) -> Result<(u64, u64)> {
     Ok((added, removed))
 }
 
-fn is_active(root: &Path) -> Result<bool> {
+pub(crate) fn is_active(root: &Path) -> Result<bool> {
     if !meta_file(root).exists() {
         return Ok(false);
     }
