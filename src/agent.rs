@@ -70,13 +70,7 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
     );
 
     let started = Instant::now();
-    let status = match execute_agent(
-        root,
-        provider.executable(),
-        provider.name(),
-        &args,
-        &run_id,
-    ) {
+    let status = match execute_agent(root, provider.executable(), provider.name(), &args, &run_id) {
         Ok(status) => status,
         Err(error) => {
             let duration_ms = elapsed_ms(started);
@@ -162,8 +156,14 @@ fn execute_agent(
         .spawn()
         .context("failed to start agent process")?;
 
-    let stdout = child.stdout.take().context("failed to capture agent stdout")?;
-    let stderr = child.stderr.take().context("failed to capture agent stderr")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture agent stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture agent stderr")?;
     let (sender, receiver) = mpsc::channel::<OutputChunk>();
 
     let stdout_sender = sender.clone();
@@ -195,7 +195,11 @@ fn execute_agent(
     child.wait().context("failed to wait for agent process")
 }
 
-fn stream_reader<R>(reader: R, stream: &'static str, sender: mpsc::Sender<OutputChunk>) -> Result<()>
+fn stream_reader<R>(
+    reader: R,
+    stream: &'static str,
+    sender: mpsc::Sender<OutputChunk>,
+) -> Result<()>
 where
     R: Read,
 {

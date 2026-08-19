@@ -625,11 +625,7 @@ fn tail(frame: &mut Frame, area: Rect, data: &Data) {
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
-                        format!(
-                            "[{}:{}] ",
-                            record.provider,
-                            short(&record.run_id, 12)
-                        ),
+                        format!("[{}:{}] ", record.provider, short(&record.run_id, 12)),
                         Style::default().fg(Color::Cyan),
                     ),
                     Span::styled(
