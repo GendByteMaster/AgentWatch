@@ -24,12 +24,179 @@ use crate::{
 };
 
 const REFRESH: Duration = Duration::from_millis(750);
+const PAGE_STEP: usize = 5;
 
 #[derive(Debug, Clone, Copy)]
 enum RunStatus {
     Running,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    Agents,
+    Events,
+    Output,
+}
+
+impl Focus {
+    fn next(self) -> Self {
+        match self {
+            Self::Agents => Self::Events,
+            Self::Events => Self::Output,
+            Self::Output => Self::Agents,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Agents => Self::Output,
+            Self::Events => Self::Agents,
+            Self::Output => Self::Events,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UiState {
+    focus: Focus,
+    selected_run: usize,
+    events_scroll: usize,
+    output_scroll: usize,
+    show_all_output: bool,
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            focus: Focus::Agents,
+            selected_run: 0,
+            events_scroll: 0,
+            output_scroll: 0,
+            show_all_output: false,
+        }
+    }
+}
+
+impl UiState {
+    fn clamp(&mut self, data: &Data) {
+        if data.runs.is_empty() {
+            self.selected_run = 0;
+        } else {
+            self.selected_run = self.selected_run.min(data.runs.len() - 1);
+        }
+
+        self.events_scroll = self
+            .events_scroll
+            .min(data.events.len().saturating_sub(1));
+        self.output_scroll = self
+            .output_scroll
+            .min(filtered_output_count(data, self).saturating_sub(1));
+    }
+
+    fn move_up(&mut self, data: &Data) {
+        match self.focus {
+            Focus::Agents => {
+                self.selected_run = self.selected_run.saturating_sub(1);
+                self.output_scroll = 0;
+            }
+            Focus::Events => {
+                self.events_scroll = self
+                    .events_scroll
+                    .saturating_add(1)
+                    .min(data.events.len().saturating_sub(1));
+            }
+            Focus::Output => {
+                self.output_scroll = self
+                    .output_scroll
+                    .saturating_add(1)
+                    .min(filtered_output_count(data, self).saturating_sub(1));
+            }
+        }
+    }
+
+    fn move_down(&mut self, data: &Data) {
+        match self.focus {
+            Focus::Agents => {
+                if self.selected_run + 1 < data.runs.len() {
+                    self.selected_run += 1;
+                    self.output_scroll = 0;
+                }
+            }
+            Focus::Events => {
+                self.events_scroll = self.events_scroll.saturating_sub(1);
+            }
+            Focus::Output => {
+                self.output_scroll = self.output_scroll.saturating_sub(1);
+            }
+        }
+    }
+
+    fn page_up(&mut self, data: &Data) {
+        match self.focus {
+            Focus::Agents => {
+                self.selected_run = self.selected_run.saturating_sub(PAGE_STEP);
+                self.output_scroll = 0;
+            }
+            Focus::Events => {
+                self.events_scroll = self
+                    .events_scroll
+                    .saturating_add(PAGE_STEP)
+                    .min(data.events.len().saturating_sub(1));
+            }
+            Focus::Output => {
+                self.output_scroll = self
+                    .output_scroll
+                    .saturating_add(PAGE_STEP)
+                    .min(filtered_output_count(data, self).saturating_sub(1));
+            }
+        }
+    }
+
+    fn page_down(&mut self, data: &Data) {
+        match self.focus {
+            Focus::Agents => {
+                if !data.runs.is_empty() {
+                    self.selected_run = self
+                        .selected_run
+                        .saturating_add(PAGE_STEP)
+                        .min(data.runs.len() - 1);
+                    self.output_scroll = 0;
+                }
+            }
+            Focus::Events => {
+                self.events_scroll = self.events_scroll.saturating_sub(PAGE_STEP);
+            }
+            Focus::Output => {
+                self.output_scroll = self.output_scroll.saturating_sub(PAGE_STEP);
+            }
+        }
+    }
+
+    fn home(&mut self) {
+        match self.focus {
+            Focus::Agents => {
+                self.selected_run = 0;
+                self.output_scroll = 0;
+            }
+            Focus::Events => self.events_scroll = 0,
+            Focus::Output => self.output_scroll = 0,
+        }
+    }
+
+    fn end(&mut self, data: &Data) {
+        match self.focus {
+            Focus::Agents => {
+                self.selected_run = data.runs.len().saturating_sub(1);
+                self.output_scroll = 0;
+            }
+            Focus::Events => self.events_scroll = data.events.len().saturating_sub(1),
+            Focus::Output => {
+                self.output_scroll = filtered_output_count(data, self).saturating_sub(1)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -66,17 +233,20 @@ pub fn run(root: &Path) -> Result<()> {
 
 fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> {
     let mut data = load(root).map_err(std::io::Error::other)?;
+    let mut ui = UiState::default();
+    ui.clamp(&data);
     let mut refreshed = Instant::now();
 
     loop {
         if refreshed.elapsed() >= REFRESH {
             if let Ok(next) = load(root) {
                 data = next;
+                ui.clamp(&data);
             }
             refreshed = Instant::now();
         }
 
-        terminal.draw(|frame| draw(frame, &data))?;
+        terminal.draw(|frame| draw(frame, &data, &ui))?;
 
         if event::poll(Duration::from_millis(100))? {
             let Event::Key(key) = event::read()? else {
@@ -85,13 +255,27 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
             if key.kind != KeyEventKind::Press {
                 continue;
             }
+
             match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('r') => {
                     if let Ok(next) = load(root) {
                         data = next;
+                        ui.clamp(&data);
                     }
                     refreshed = Instant::now();
+                }
+                KeyCode::Tab => ui.focus = ui.focus.next(),
+                KeyCode::BackTab => ui.focus = ui.focus.previous(),
+                KeyCode::Up | KeyCode::Char('k') => ui.move_up(&data),
+                KeyCode::Down | KeyCode::Char('j') => ui.move_down(&data),
+                KeyCode::PageUp => ui.page_up(&data),
+                KeyCode::PageDown => ui.page_down(&data),
+                KeyCode::Home => ui.home(),
+                KeyCode::End => ui.end(&data),
+                KeyCode::Char('a') => {
+                    ui.show_all_output = !ui.show_all_output;
+                    ui.output_scroll = 0;
                 }
                 _ => {}
             }
@@ -217,11 +401,11 @@ fn git_info(root: &Path) -> GitInfo {
             let mut parts = line.split('\t');
             added += parts
                 .next()
-                .and_then(|v| v.parse::<u64>().ok())
+                .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0);
             removed += parts
                 .next()
-                .and_then(|v| v.parse::<u64>().ok())
+                .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0);
         }
     }
@@ -246,7 +430,24 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn draw(frame: &mut Frame, data: &Data) {
+fn selected_run_id<'a>(data: &'a Data, ui: &UiState) -> Option<&'a str> {
+    data.runs.get(ui.selected_run).map(|run| run.id.as_str())
+}
+
+fn output_matches(record: &AgentOutputRecord, data: &Data, ui: &UiState) -> bool {
+    ui.show_all_output
+        || selected_run_id(data, ui).is_none()
+        || selected_run_id(data, ui).is_some_and(|run_id| record.run_id == run_id)
+}
+
+fn filtered_output_count(data: &Data, ui: &UiState) -> usize {
+    data.output
+        .iter()
+        .filter(|record| output_matches(record, data, ui))
+        .count()
+}
+
+fn draw(frame: &mut Frame, data: &Data, ui: &UiState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -259,8 +460,8 @@ fn draw(frame: &mut Frame, data: &Data) {
 
     header(frame, layout[0], data);
     cards(frame, layout[1], data);
-    body(frame, layout[2], data);
-    footer(frame, layout[3]);
+    body(frame, layout[2], data, ui);
+    footer(frame, layout[3], ui);
 }
 
 fn header(frame: &mut Frame, area: Rect, data: &Data) {
@@ -278,7 +479,7 @@ fn header(frame: &mut Frame, area: Rect, data: &Data) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "AgentWatch TUI v0.1.0",
+                format!("AgentWatch TUI v{}", env!("CARGO_PKG_VERSION")),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -426,7 +627,7 @@ fn card(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
     );
 }
 
-fn body(frame: &mut Frame, area: Rect, data: &Data) {
+fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -439,11 +640,11 @@ fn body(frame: &mut Frame, area: Rect, data: &Data) {
     let middle = split(rows[1]);
     let bottom = split(rows[2]);
 
-    agents(frame, top[0], data);
+    agents(frame, top[0], data, ui);
     files(frame, top[1], data);
-    recent(frame, middle[0], data);
+    recent(frame, middle[0], data, ui);
     tests(frame, middle[1], data);
-    tail(frame, bottom[0], data);
+    tail(frame, bottom[0], data, ui);
     session(frame, bottom[1], data);
 }
 
@@ -454,30 +655,67 @@ fn split(area: Rect) -> std::rc::Rc<[Rect]> {
         .split(area)
 }
 
-fn agents(frame: &mut Frame, area: Rect, data: &Data) {
+fn panel_block(title: &str, focused: bool) -> Block<'_> {
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_style(if focused {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        })
+}
+
+fn agents(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let header = Row::new([
         "Status", "Provider", "Run ID", "Command", "Duration", "Started",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let rows = data.runs.iter().take(8).map(|run| {
-        let (label, color) = match run.status {
-            RunStatus::Running => ("● Running", Color::Green),
-            RunStatus::Completed => ("✓ Completed", Color::Green),
-            RunStatus::Failed => ("✗ Failed", Color::Red),
-        };
-        let duration = run
-            .duration_ms
-            .map(duration)
-            .unwrap_or_else(|| live_duration(run.started));
-        Row::new([
-            Cell::from(label).style(Style::default().fg(color)),
-            Cell::from(run.provider.clone()).style(Style::default().fg(Color::Cyan)),
-            Cell::from(short(&run.id, 14)),
-            Cell::from(short(&run.command, 36)),
-            Cell::from(duration),
-            Cell::from(run.started.format("%H:%M:%S").to_string()),
-        ])
-    });
+
+    let visible = usize::from(area.height.saturating_sub(3)).max(1);
+    let start = ui
+        .selected_run
+        .saturating_sub(visible.saturating_sub(1));
+    let rows = data
+        .runs
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(index, run)| {
+            let (label, color) = match run.status {
+                RunStatus::Running => ("● Running", Color::Green),
+                RunStatus::Completed => ("✓ Completed", Color::Green),
+                RunStatus::Failed => ("✗ Failed", Color::Red),
+            };
+            let duration = run
+                .duration_ms
+                .map(duration)
+                .unwrap_or_else(|| live_duration(run.started));
+            let row = Row::new([
+                Cell::from(label).style(Style::default().fg(color)),
+                Cell::from(run.provider.clone()).style(Style::default().fg(Color::Cyan)),
+                Cell::from(short(&run.id, 14)),
+                Cell::from(short(&run.command, 36)),
+                Cell::from(duration),
+                Cell::from(run.started.format("%H:%M:%S").to_string()),
+            ]);
+            if index == ui.selected_run {
+                row.style(Style::default().add_modifier(Modifier::REVERSED))
+            } else {
+                row
+            }
+        });
+
+    let title = if data.runs.is_empty() {
+        "Agents (live) — no runs".to_owned()
+    } else {
+        format!(
+            "Agents (live) — selected {}/{}",
+            ui.selected_run + 1,
+            data.runs.len()
+        )
+    };
 
     frame.render_widget(
         Table::new(
@@ -493,11 +731,7 @@ fn agents(frame: &mut Frame, area: Rect, data: &Data) {
         )
         .header(header)
         .column_spacing(1)
-        .block(
-            Block::default()
-                .title("Agents (live)")
-                .borders(Borders::ALL),
-        ),
+        .block(panel_block(&title, ui.focus == Focus::Agents)),
         area,
     );
 }
@@ -534,12 +768,14 @@ fn files(frame: &mut Frame, area: Rect, data: &Data) {
     );
 }
 
-fn recent(frame: &mut Frame, area: Rect, data: &Data) {
+fn recent(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
+    let limit = area.height.saturating_sub(2) as usize;
     let lines = data
         .events
         .iter()
         .rev()
-        .take(area.height.saturating_sub(2) as usize)
+        .skip(ui.events_scroll)
+        .take(limit)
         .map(|event| {
             let detail = event
                 .path
@@ -549,7 +785,7 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data) {
                     event
                         .command
                         .as_ref()
-                        .map(|cmd| format!("cmd={}", short(cmd, 48)))
+                        .map(|command| format!("cmd={}", short(command, 48)))
                 })
                 .unwrap_or_default();
             Line::from(vec![
@@ -565,12 +801,9 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data) {
             ])
         })
         .collect::<Vec<_>>();
+    let title = format!("Recent Events — offset {}", ui.events_scroll);
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title("Recent Events")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(lines).block(panel_block(&title, ui.focus == Focus::Events)),
         area,
     );
 }
@@ -606,18 +839,30 @@ fn tests(frame: &mut Frame, area: Rect, data: &Data) {
     );
 }
 
-fn tail(frame: &mut Frame, area: Rect, data: &Data) {
+fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let limit = area.height.saturating_sub(2) as usize;
-    let lines = if data.output.is_empty() {
+    let selected = selected_run_id(data, ui);
+    let records = data
+        .output
+        .iter()
+        .rev()
+        .filter(|record| output_matches(record, data, ui))
+        .skip(ui.output_scroll)
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    let lines = if records.is_empty() {
         vec![Line::styled(
-            "No captured agent output yet",
+            if ui.show_all_output || selected.is_none() {
+                "No captured agent output yet"
+            } else {
+                "No captured output for selected run"
+            },
             Style::default().fg(Color::DarkGray),
         )]
     } else {
-        data.output
-            .iter()
-            .rev()
-            .take(limit)
+        records
+            .into_iter()
             .map(|record| {
                 Line::from(vec![
                     Span::styled(
@@ -638,13 +883,18 @@ fn tail(frame: &mut Frame, area: Rect, data: &Data) {
             .collect::<Vec<_>>()
     };
 
+    let scope = if ui.show_all_output {
+        "all runs".to_owned()
+    } else if let Some(run_id) = selected {
+        format!("{}", short(run_id, 18))
+    } else {
+        "all runs".to_owned()
+    };
+    let title = format!("Live Agent Output — {scope} — offset {}", ui.output_scroll);
+
     frame.render_widget(
         Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title("Live Agent Output")
-                    .borders(Borders::ALL),
-            )
+            .block(panel_block(&title, ui.focus == Focus::Output))
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -678,13 +928,26 @@ fn session(frame: &mut Frame, area: Rect, data: &Data) {
     );
 }
 
-fn footer(frame: &mut Frame, area: Rect) {
+fn footer(frame: &mut Frame, area: Rect, ui: &UiState) {
+    let focus = match ui.focus {
+        Focus::Agents => "Agents",
+        Focus::Events => "Events",
+        Focus::Output => "Output",
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" q ", Style::default().bg(Color::Blue).fg(Color::White)),
-            Span::raw(" Quit   "),
+            Span::styled(" Tab ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(format!(" Focus:{focus}  ")),
+            Span::styled(" ↑↓/jk ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(" Navigate  "),
+            Span::styled(" PgUp/PgDn ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(" Page  "),
+            Span::styled(" a ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(" All/Selected  "),
             Span::styled(" r ", Style::default().bg(Color::Blue).fg(Color::White)),
-            Span::raw(" Refresh   auto 750ms"),
+            Span::raw(" Refresh  "),
+            Span::styled(" q ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(" Quit"),
         ])),
         area,
     );
