@@ -212,7 +212,10 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
         .iter()
         .filter(|event| event.exit_code.unwrap_or(1) != 0)
         .count();
-    let agents: Vec<_> = events.iter().filter(|event| event.kind == "agent").collect();
+    let agents: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == "agent")
+        .collect();
     let providers: BTreeSet<_> = agents
         .iter()
         .filter_map(|event| event.provider.as_deref())
