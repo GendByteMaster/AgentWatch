@@ -36,7 +36,7 @@ pub fn watch(path: &Path) -> Result<()> {
                         continue;
                     }
 
-                    if let Err(error) = session::record(path, kind.clone(), &changed) {
+                    if let Err(error) = session::record_file(path, kind.clone(), &changed) {
                         eprintln!("session record error: {error}");
                     }
 
