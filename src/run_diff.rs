@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::attribution::SnapshotDiff;
+use crate::{attribution::SnapshotDiff, redaction};
 
 const RUNS_DIR: &str = ".agentwatch/runs";
 
@@ -55,8 +55,9 @@ pub fn persist(root: &Path, run_id: &str, diff: &SnapshotDiff) -> Result<()> {
     let stem = safe_run_id(run_id);
     let patch_path = dir.join(format!("{stem}.diff"));
     let meta_path = dir.join(format!("{stem}.json"));
+    let redacted_patch = redaction::redact(&diff.patch);
 
-    fs::write(&patch_path, diff.patch.as_bytes())
+    fs::write(&patch_path, redacted_patch.as_bytes())
         .with_context(|| format!("failed to persist run diff {}", patch_path.display()))?;
     let bytes =
         serde_json::to_vec_pretty(&meta).context("failed to serialize run diff metadata")?;
