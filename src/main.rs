@@ -1,4 +1,5 @@
 mod agent;
+mod app_server;
 mod approval;
 mod approval_ipc;
 mod attribution;
@@ -83,6 +84,20 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Run Codex through the native App Server JSON-RPC protocol.
+    #[command(name = "codex-app")]
+    CodexApp {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Resume an existing persisted Codex thread instead of starting a new one.
+        #[arg(long)]
+        thread: Option<String>,
+        /// Override the Codex model for this thread/turn.
+        #[arg(short = 'm', long)]
+        model: Option<String>,
+        #[arg(required = true, trailing_var_arg = true)]
+        prompt: Vec<String>,
+    },
     /// Evaluate a file path against the active policy.
     CheckPath {
         target: PathBuf,
@@ -114,6 +129,15 @@ fn main() -> Result<()> {
         Command::Session { path } => session::show(&path),
         Command::Run { path, command } => runner::run(&path, &command),
         Command::Codex { path, args } => agent::run(&path, CodexProvider, &args),
+        Command::CodexApp {
+            path,
+            thread,
+            model,
+            prompt,
+        } => {
+            let prompt = prompt.join(" ");
+            app_server::run(&path, &prompt, thread.as_deref(), model.as_deref())
+        }
         Command::CheckPath { target, root } => {
             let evaluation = policy::evaluate_path(&root, &target)?;
             println!("decision: {}", evaluation.decision.label());

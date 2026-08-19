@@ -121,6 +121,35 @@ Private-key redaction is stream-aware, so a multi-line key remains suppressed ev
 
 Redaction is deliberately safety-by-default, but it is still pattern-based rather than a full DLP system. Existing artifacts created before this feature are not rewritten retroactively.
 
+### Codex App Server-native integration
+
+AgentWatch can run Codex through the same **App Server JSON-RPC protocol** used by rich Codex clients instead of wrapping `codex exec`:
+
+```bash
+agentwatch codex-app -- "Fix the failing tests"
+```
+
+This mode starts a short-lived local `codex app-server` over stdio, performs the initialize handshake, starts a new persisted Codex thread, starts a turn, and consumes the native event stream until `turn/completed`. Use `--thread THREAD_ID` to resume an existing persisted/idle Codex thread and `--model MODEL` to override the model.
+
+Native App Server events are mapped into AgentWatch's existing run model:
+
+```text
+thread/start or thread/resume
+        │
+        └── turn/start
+              ├── item/started                    -> tool.*.started
+              ├── commandExecution/outputDelta    -> live output
+              ├── item/completed                  -> tool.*.completed / failed
+              ├── approval server requests        -> AgentWatch Approval Gate
+              └── turn/completed                  -> agent.completed / failed
+```
+
+Command and file approvals are handled through App Server's first-class server requests (`item/commandExecution/requestApproval` and `item/fileChange/requestApproval`). They are routed into the same AgentWatch TUI/terminal approval flow, so this path does **not** need a Codex hook or hook-trust bypass. Unsupported permission-profile, network-only, or unknown server requests fail closed rather than being auto-approved.
+
+Each run also keeps normal AgentWatch worktree attribution/diff artifacts and stores App Server identity metadata under `.agentwatch/runs/<run_id>.app.json` with the Codex `thread_id`, `turn_id`, resolved model, and terminal status.
+
+`agentwatch codex-app` is App Server-native, but it does **not** claim to attach to a turn that is already executing inside an independently launched Codex Desktop process. Cross-client live attachment depends on a shared App Server transport/daemon; the managed daemon lifecycle is currently experimental and Unix-only. `agentwatch codex` remains the portable `codex exec` fallback.
+
 ### Approval Gate
 
 For an active Codex run, AgentWatch can enforce the repository policy **before a tool action executes** by installing a session-scoped Codex `PreToolUse` hook.
@@ -259,6 +288,12 @@ Run Codex through AgentWatch in another terminal:
 agentwatch codex -- "Fix the failing tests"
 ```
 
+Or use the App Server-native transport:
+
+```bash
+agentwatch codex-app -- "Fix the failing tests"
+```
+
 That is enough to get:
 
 - agent lifecycle tracking
@@ -315,6 +350,7 @@ agentwatch stop
 | `agentwatch diff` | Print the current Git diff |
 | `agentwatch run -- <command>` | Execute and record a command or test run |
 | `agentwatch codex -- <args>` | Execute Codex through the provider layer |
+| `agentwatch codex-app -- <prompt>` | Execute a Codex turn through the native App Server protocol |
 | `agentwatch check-path <path>` | Evaluate a path against the policy engine |
 | `agentwatch check-command -- <command>` | Evaluate a command without executing it |
 
@@ -327,6 +363,7 @@ agentwatch status
 agentwatch diff
 agentwatch run -- cargo test
 agentwatch codex -- -m gpt-5.6-sol "Refactor the parser"
+agentwatch codex-app --model gpt-5.6-sol -- "Refactor the parser through App Server"
 agentwatch check-path .env
 agentwatch check-command -- git reset --hard HEAD
 ```
