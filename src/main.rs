@@ -1,4 +1,5 @@
 mod agent;
+mod approval;
 mod attribution;
 mod dashboard;
 mod git;
@@ -95,6 +96,8 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    #[command(name = "approval-hook", hide = true)]
+    ApprovalHook,
 }
 
 fn main() -> Result<()> {
@@ -126,5 +129,6 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::ApprovalHook => approval::run_hook(),
     }
 }
