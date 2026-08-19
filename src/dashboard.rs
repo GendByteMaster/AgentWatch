@@ -87,9 +87,7 @@ impl UiState {
             self.selected_run = self.selected_run.min(data.runs.len() - 1);
         }
 
-        self.events_scroll = self
-            .events_scroll
-            .min(data.events.len().saturating_sub(1));
+        self.events_scroll = self.events_scroll.min(data.events.len().saturating_sub(1));
         self.output_scroll = self
             .output_scroll
             .min(filtered_output_count(data, self).saturating_sub(1));
@@ -673,9 +671,7 @@ fn agents(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     .style(Style::default().add_modifier(Modifier::BOLD));
 
     let visible = usize::from(area.height.saturating_sub(3)).max(1);
-    let start = ui
-        .selected_run
-        .saturating_sub(visible.saturating_sub(1));
+    let start = ui.selected_run.saturating_sub(visible.saturating_sub(1));
     let rows = data
         .runs
         .iter()
@@ -886,7 +882,7 @@ fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let scope = if ui.show_all_output {
         "all runs".to_owned()
     } else if let Some(run_id) = selected {
-        format!("{}", short(run_id, 18))
+        short(run_id, 18).to_string()
     } else {
         "all runs".to_owned()
     };
@@ -940,7 +936,10 @@ fn footer(frame: &mut Frame, area: Rect, ui: &UiState) {
             Span::raw(format!(" Focus:{focus}  ")),
             Span::styled(" ↑↓/jk ", Style::default().bg(Color::Blue).fg(Color::White)),
             Span::raw(" Navigate  "),
-            Span::styled(" PgUp/PgDn ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::styled(
+                " PgUp/PgDn ",
+                Style::default().bg(Color::Blue).fg(Color::White),
+            ),
             Span::raw(" Page  "),
             Span::styled(" a ", Style::default().bg(Color::Blue).fg(Color::White)),
             Span::raw(" All/Selected  "),
