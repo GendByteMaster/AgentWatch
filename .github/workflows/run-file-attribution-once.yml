@@ -34,15 +34,10 @@ jobs:
               1,
           )
 
-          old = '''    let end = run.ended_at.unwrap_or_else(Utc::now);
-          let observed_files: BTreeSet<_> = data
-              .events
-              .iter()
-              .filter(|event| event.timestamp >= run.started && event.timestamp <= end)
-              .filter_map(|event| event.path.as_ref())
-              .collect();
-          '''
-          new = '''    let attributed_files = data
+          details = text.index("fn run_details(")
+          files_start = text.index("    let end = run.ended_at", details)
+          status_start = text.index("    let (status, status_style)", files_start)
+          attributed = '''    let attributed_files = data
               .events
               .iter()
               .filter(|event| event.run_id.as_deref() == Some(run.id.as_str()))
@@ -57,49 +52,36 @@ jobs:
               })
               .collect::<Vec<_>>();
           '''
-          if old not in text:
-              raise SystemExit("run details time-window block not found")
-          text = text.replace(old, new, 1)
+          text = text[:files_start] + attributed + text[status_start:]
           text = text.replace(
               '            "Observed files (time window)",',
               '            "Files attributed to run",',
               1,
           )
-          text = text.replace(
-              '''    if observed_files.is_empty() {
-              lines.push(Line::styled(
-                  "  none recorded (watcher may be inactive)",
-                  Style::default().fg(Color::DarkGray),
-              ));
-          } else {
-              for path in observed_files.iter().take(file_limit) {
-                  lines.push(Line::raw(format!("  {}", path.display())));
-              }
-              if observed_files.len() > file_limit {
+
+          details = text.index("fn run_details(")
+          loop_start = text.index("    let file_limit =", details)
+          render_start = text.index("    frame.render_widget(", loop_start)
+          file_block = '''    let file_limit = area.height.saturating_sub(15) as usize;
+              if attributed_files.is_empty() {
                   lines.push(Line::styled(
-                      format!("  +{} more", observed_files.len() - file_limit),
+                      "  no net file changes recorded",
                       Style::default().fg(Color::DarkGray),
                   ));
+              } else {
+                  for (change, path) in attributed_files.iter().take(file_limit) {
+                      lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
+                  }
+                  if attributed_files.len() > file_limit {
+                      lines.push(Line::styled(
+                          format!("  +{} more", attributed_files.len() - file_limit),
+                          Style::default().fg(Color::DarkGray),
+                      ));
+                  }
               }
-          }''',
-              '''    if attributed_files.is_empty() {
-              lines.push(Line::styled(
-                  "  no net file changes recorded",
-                  Style::default().fg(Color::DarkGray),
-              ));
-          } else {
-              for (change, path) in attributed_files.iter().take(file_limit) {
-                  lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
-              }
-              if attributed_files.len() > file_limit {
-                  lines.push(Line::styled(
-                      format!("  +{} more", attributed_files.len() - file_limit),
-                      Style::default().fg(Color::DarkGray),
-                  ));
-              }
-          }''',
-              1,
-          )
+
+          '''
+          text = text[:loop_start] + file_block + text[render_start:]
           dashboard.write_text(text)
 
           readme = Path("README.md")
@@ -131,11 +113,9 @@ That is enough for lifecycle events, live stdout/stderr, policy checks, and run-
 '''
               text = text.replace("## Commands\n", quick + "## Commands\n", 1)
 
-          text = text.replace(
-              "The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.",
-              "The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing.",
-              1,
-          )
+          old_note = "The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active."
+          new_note = "The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing."
+          text = text.replace(old_note, new_note, 1)
           text = text.replace(
               "11. Optional safe control actions",
               "11. Run-scoped net file attribution ✅\n12. Optional safe control actions",
