@@ -67,7 +67,8 @@ enum Command {
         root: PathBuf,
     },
     /// Evaluate a command against the active policy without running it.
-    CheckCommand {
+    #[command(name = "check-command")]
+    CheckCmd {
         #[arg(short, long, default_value = ".")]
         path: PathBuf,
         #[arg(required = true, trailing_var_arg = true)]
@@ -94,7 +95,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        Command::CheckCommand { path, command } => {
+        Command::CheckCmd { path, command } => {
             let evaluation = policy::evaluate_command(&path, &command)?;
             println!("decision: {}", evaluation.decision.label());
             if let Some(rule) = evaluation.matched_rule {
