@@ -5,6 +5,7 @@ mod git;
 mod output;
 mod policy;
 mod provider;
+mod redaction;
 mod risk;
 mod run_diff;
 mod runner;
