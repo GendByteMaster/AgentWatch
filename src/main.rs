@@ -1,6 +1,7 @@
 mod agent;
 mod dashboard;
 mod git;
+mod output;
 mod policy;
 mod provider;
 mod risk;
