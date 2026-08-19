@@ -82,8 +82,7 @@ pub fn load(root: &Path) -> Result<PolicyConfig> {
 
     let source = fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&source)
-        .with_context(|| format!("failed to parse {}", path.display()))
+    toml::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 pub fn evaluate_path(root: &Path, path: &Path) -> Result<Evaluation> {
@@ -92,33 +91,64 @@ pub fn evaluate_path(root: &Path, path: &Path) -> Result<Evaluation> {
     let normalized = relative.to_string_lossy().replace('\\', "/");
 
     if let Some(rule) = first_glob_match(&config.paths.ignore, &normalized)? {
-        return Ok(Evaluation { decision: Decision::Allow, matched_rule: Some(format!("ignore:{rule}")) });
+        return Ok(Evaluation {
+            decision: Decision::Allow,
+            matched_rule: Some(format!("ignore:{rule}")),
+        });
     }
 
     if let Some(rule) = first_glob_match(&config.paths.deny, &normalized)? {
-        return Ok(Evaluation { decision: Decision::Deny, matched_rule: Some(rule) });
+        return Ok(Evaluation {
+            decision: Decision::Deny,
+            matched_rule: Some(rule),
+        });
     }
 
     if let Some(rule) = first_glob_match(&config.paths.warn, &normalized)? {
-        return Ok(Evaluation { decision: Decision::Warn, matched_rule: Some(rule) });
+        return Ok(Evaluation {
+            decision: Decision::Warn,
+            matched_rule: Some(rule),
+        });
     }
 
-    Ok(Evaluation { decision: Decision::Allow, matched_rule: None })
+    Ok(Evaluation {
+        decision: Decision::Allow,
+        matched_rule: None,
+    })
 }
 
 pub fn evaluate_command(root: &Path, command: &[String]) -> Result<Evaluation> {
     let config = load(root)?;
     let joined = command.join(" ").to_ascii_lowercase();
 
-    if let Some(rule) = config.commands.deny.iter().find(|rule| joined.contains(&rule.to_ascii_lowercase())) {
-        return Ok(Evaluation { decision: Decision::Deny, matched_rule: Some(rule.clone()) });
+    if let Some(rule) = config
+        .commands
+        .deny
+        .iter()
+        .find(|rule| joined.contains(&rule.to_ascii_lowercase()))
+    {
+        return Ok(Evaluation {
+            decision: Decision::Deny,
+            matched_rule: Some(rule.clone()),
+        });
     }
 
-    if let Some(rule) = config.commands.warn.iter().find(|rule| joined.contains(&rule.to_ascii_lowercase())) {
-        return Ok(Evaluation { decision: Decision::Warn, matched_rule: Some(rule.clone()) });
+    if let Some(rule) = config
+        .commands
+        .warn
+        .iter()
+        .find(|rule| joined.contains(&rule.to_ascii_lowercase()))
+    {
+        return Ok(Evaluation {
+            decision: Decision::Warn,
+            matched_rule: Some(rule.clone()),
+        });
     }
 
-    Ok(Evaluation { decision: Decision::Allow, matched_rule: None })
+    Ok(Evaluation {
+        decision: Decision::Allow,
+        matched_rule: None,
+    })
 }
 
 fn first_glob_match(patterns: &[String], value: &str) -> Result<Option<String>> {
@@ -145,7 +175,11 @@ fn default_warn_paths() -> Vec<String> {
 }
 
 fn default_deny_paths() -> Vec<String> {
-    vec!["**/*private_key*".into(), "**/*.pem".into(), "**/*.key".into()]
+    vec![
+        "**/*private_key*".into(),
+        "**/*.pem".into(),
+        "**/*.key".into(),
+    ]
 }
 
 fn default_ignore_paths() -> Vec<String> {
@@ -169,5 +203,9 @@ fn default_warn_commands() -> Vec<String> {
 }
 
 fn default_deny_commands() -> Vec<String> {
-    vec!["rm -rf /".into(), "rm -rf /*".into(), "format c:".into()]
+    vec![
+        "rm -rf /".into(),
+        "rm -rf /*".into(),
+        "format c:".into(),
+    ]
 }
