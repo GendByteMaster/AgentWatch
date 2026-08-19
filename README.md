@@ -149,7 +149,7 @@ Every decision is appended to `events.jsonl` as `approval.requested`, `approval.
 
 The current Codex adapter injects the hook as a per-invocation config override and uses Codex's hook-trust bypass flag so the generated session hook can run without a persisted trust record. That flag applies to enabled untrusted hooks for the same Codex invocation, so repositories with additional Codex hooks should review them before using the gate. A future native app-server approval transport can remove this adapter-level limitation.
 
-The TUI remains read-only in this version: approval decisions are made in the invoking terminal, while the TUI observes the resulting audit events.
+When the AgentWatch TUI is open, it advertises a short-lived local heartbeat. Approval requests are then routed into a `Pending Approval` modal where `a`, `s`, and `d` mean Allow once, Allow for session, and Deny. If the TUI is not running or its heartbeat becomes stale, the hook falls back to the invoking terminal. If neither interactive path is available, the gate fails closed.
 
 ### Policy engine
 
@@ -366,11 +366,17 @@ PageUp / PageDown scroll by 5 items
 Home / End        jump to boundary
  a                all runs / selected run output
  d                open Run Diff for selected run
+
+When `Pending Approval` is visible, approval keys take precedence:
+
+ a                allow once
+ s                allow matched warning rule for this session
+ d                deny
  r                refresh now
  q / Esc          quit
 ```
 
-The dashboard is intentionally **read-only** today. AgentWatch does not yet expose kill, retry, or approval controls from the TUI.
+The dashboard remains read-only for agent process controls such as kill/retry, but Approval Gate decisions are interactive through the `Pending Approval` modal.
 
 ### Selected run details
 
@@ -560,6 +566,7 @@ Session state lives inside the observed repository:
 ├── events.jsonl        # append-only lifecycle / filesystem / command events
 ├── agent-output.jsonl  # append-only provider stdout/stderr records
 ├── approval-grants/    # current-session warning-rule grants
+├── approvals/           # ephemeral TUI heartbeat / pending decisions
 └── runs/               # per-run diff artifacts
     ├── run-....diff
     └── run-....json

@@ -3,6 +3,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -10,6 +11,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
+    approval_ipc::{self, ApprovalChoice, ApprovalRequest},
     policy::{self, Decision},
     session,
 };
@@ -112,7 +114,9 @@ fn handle_hook() -> Result<Option<String>> {
                 Some(risk.clone()),
             );
 
-            let decision = prompt_user(&input, &description, &reason).unwrap_or(UserDecision::Deny);
+            let decision =
+                decision_for_prompt(&root, &run_id, &input, &description, &reason, &risk)
+                    .unwrap_or(UserDecision::Deny);
             match decision {
                 UserDecision::AllowOnce => {
                     record_event(
@@ -274,6 +278,38 @@ fn parse_patch_paths(text: &str, paths: &mut Vec<String>) {
     }
 }
 
+fn decision_for_prompt(
+    root: &Path,
+    run_id: &str,
+    input: &PreToolUseInput,
+    description: &str,
+    reason: &str,
+    risk: &str,
+) -> Result<UserDecision> {
+    if approval_ipc::tui_is_alive(root)? {
+        let request = ApprovalRequest::new(
+            run_id,
+            &input.tool_name,
+            &input.tool_use_id,
+            description,
+            reason,
+            risk,
+        );
+        approval_ipc::publish_request(root, &request)?;
+        let timeout = policy::load(root)?.approvals.timeout_seconds;
+        let max_wait = Duration::from_secs(timeout.saturating_sub(5).max(1));
+        if let Some(choice) = approval_ipc::wait_for_decision(root, &request.id, max_wait)? {
+            return Ok(match choice {
+                ApprovalChoice::AllowOnce => UserDecision::AllowOnce,
+                ApprovalChoice::AllowSession => UserDecision::AllowSession,
+                ApprovalChoice::Deny => UserDecision::Deny,
+            });
+        }
+    }
+
+    prompt_user(input, description, reason)
+}
+
 fn prompt_user(input: &PreToolUseInput, description: &str, reason: &str) -> Result<UserDecision> {
     let (reader, mut writer) = open_tty()?;
     writeln!(writer)?;
@@ -357,6 +393,7 @@ fn persist_session_grant(root: &Path, key: &str) -> Result<()> {
 }
 
 pub fn clear_session_grants(root: &Path) -> Result<()> {
+    approval_ipc::clear(root)?;
     let dir = grants_dir(root);
     if dir.exists() {
         fs::remove_dir_all(&dir)

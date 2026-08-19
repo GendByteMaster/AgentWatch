@@ -15,16 +15,18 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
 };
 
 use crate::{
+    approval_ipc::{self, ApprovalChoice, ApprovalRequest},
     output::{self, AgentOutputRecord},
     run_diff::{self, RunDiff},
     session::{SessionEvent, SessionMeta},
 };
 
 const REFRESH: Duration = Duration::from_millis(750);
+const HEARTBEAT_REFRESH: Duration = Duration::from_secs(1);
 const PAGE_STEP: usize = 5;
 
 #[derive(Debug, Clone, Copy)]
@@ -270,6 +272,7 @@ struct GitInfo {
 #[derive(Debug)]
 struct Data {
     meta: SessionMeta,
+    approvals: Vec<ApprovalRequest>,
     events: Vec<SessionEvent>,
     output: Vec<AgentOutputRecord>,
     runs: Vec<AgentRun>,
@@ -281,13 +284,31 @@ pub fn run(root: &Path) -> Result<()> {
     Ok(())
 }
 
+struct TuiHeartbeatGuard<'a> {
+    root: &'a Path,
+}
+
+impl Drop for TuiHeartbeatGuard<'_> {
+    fn drop(&mut self) {
+        let _ = approval_ipc::clear_tui_heartbeat(self.root);
+    }
+}
+
 fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> {
+    approval_ipc::touch_tui_heartbeat(root).map_err(std::io::Error::other)?;
+    let _heartbeat_guard = TuiHeartbeatGuard { root };
+    let mut heartbeat = Instant::now();
     let mut data = load(root).map_err(std::io::Error::other)?;
     let mut ui = UiState::default();
     ui.clamp(&data);
     let mut refreshed = Instant::now();
 
     loop {
+        if heartbeat.elapsed() >= HEARTBEAT_REFRESH {
+            approval_ipc::touch_tui_heartbeat(root).map_err(std::io::Error::other)?;
+            heartbeat = Instant::now();
+        }
+
         if refreshed.elapsed() >= REFRESH {
             if let Ok(next) = load(root) {
                 data = next;
@@ -303,6 +324,26 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
                 continue;
             };
             if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if let Some(request) = data.approvals.first() {
+                let choice = match key.code {
+                    KeyCode::Char('a') => Some(ApprovalChoice::AllowOnce),
+                    KeyCode::Char('s') => Some(ApprovalChoice::AllowSession),
+                    KeyCode::Char('d') => Some(ApprovalChoice::Deny),
+                    KeyCode::Char('q') | KeyCode::Esc => break,
+                    _ => None,
+                };
+                if let Some(choice) = choice {
+                    approval_ipc::write_decision(root, &request.id, choice)
+                        .map_err(std::io::Error::other)?;
+                    if let Ok(next) = load(root) {
+                        data = next;
+                        ui.clamp(&data);
+                    }
+                    refreshed = Instant::now();
+                }
                 continue;
             }
 
@@ -366,6 +407,7 @@ fn load(root: &Path) -> Result<Data> {
     )
     .context("failed to parse session metadata")?;
 
+    let approvals = approval_ipc::read_pending(root)?;
     let events = read_events(root)?;
     let output = output::read_tail(root, &meta.started_at, output::DEFAULT_TAIL_BYTES)?;
     let runs = aggregate_runs(&events);
@@ -373,6 +415,7 @@ fn load(root: &Path) -> Result<Data> {
 
     Ok(Data {
         meta,
+        approvals,
         events,
         output,
         runs,
@@ -543,6 +586,9 @@ fn filtered_output_count(data: &Data, ui: &UiState) -> usize {
 fn draw(frame: &mut Frame, data: &Data, ui: &UiState) {
     if let Some(view) = &ui.diff_view {
         draw_run_diff(frame, data, ui, view);
+        if let Some(request) = data.approvals.first() {
+            approval_overlay(frame, request, data.approvals.len());
+        }
         return;
     }
 
@@ -560,6 +606,61 @@ fn draw(frame: &mut Frame, data: &Data, ui: &UiState) {
     cards(frame, layout[1], data);
     body(frame, layout[2], data, ui);
     footer(frame, layout[3], ui);
+    if let Some(request) = data.approvals.first() {
+        approval_overlay(frame, request, data.approvals.len());
+    }
+}
+
+fn approval_overlay(frame: &mut Frame, request: &ApprovalRequest, pending: usize) {
+    let area = frame.area();
+    let width = (area.width.saturating_mul(82) / 100)
+        .max(40)
+        .min(area.width);
+    let height = 11_u16.min(area.height);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Tool: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(request.tool_name.clone(), Style::default().fg(Color::Cyan)),
+            Span::raw("    Run: "),
+            Span::raw(short(&request.run_id, 20).to_string()),
+        ]),
+        Line::raw(format!("Action: {}", request.description)),
+        Line::styled(
+            format!("Reason: {}", request.reason),
+            Style::default().fg(Color::Yellow),
+        ),
+        Line::styled(
+            format!("Risk: {}", request.risk),
+            Style::default().fg(Color::Red),
+        ),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(" a ", Style::default().bg(Color::Green).fg(Color::Black)),
+            Span::raw(" Allow once   "),
+            Span::styled(" s ", Style::default().bg(Color::Blue).fg(Color::White)),
+            Span::raw(" Allow session   "),
+            Span::styled(" d ", Style::default().bg(Color::Red).fg(Color::White)),
+            Span::raw(" Deny"),
+        ]),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(format!(" Pending Approval — {pending} queued "))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .wrap(Wrap { trim: false }),
+        popup,
+    );
 }
 
 fn header(frame: &mut Frame, area: Rect, data: &Data) {

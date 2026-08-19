@@ -100,8 +100,12 @@ pub fn tui_is_alive(root: &Path) -> Result<bool> {
 pub fn publish_request(root: &Path, request: &ApprovalRequest) -> Result<()> {
     validate_id(&request.id)?;
     let dir = pending_dir(root);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create pending approval directory {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create pending approval directory {}",
+            dir.display()
+        )
+    })?;
     let bytes = serde_json::to_vec_pretty(request)
         .context("failed to serialize AgentWatch approval request")?;
     atomic_write(&dir.join(format!("{}.json", request.id)), &bytes)
@@ -130,7 +134,11 @@ pub fn read_pending(root: &Path) -> Result<Vec<ApprovalRequest>> {
         let Ok(request) = serde_json::from_slice::<ApprovalRequest>(&bytes) else {
             continue;
         };
-        if validate_id(&request.id).is_ok() {
+        if validate_id(&request.id).is_ok()
+            && !decisions_dir(root)
+                .join(format!("{}.json", request.id))
+                .exists()
+        {
             requests.push(request);
         }
     }
@@ -141,8 +149,12 @@ pub fn read_pending(root: &Path) -> Result<Vec<ApprovalRequest>> {
 pub fn write_decision(root: &Path, request_id: &str, choice: ApprovalChoice) -> Result<()> {
     validate_id(request_id)?;
     let dir = decisions_dir(root);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create approval decision directory {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create approval decision directory {}",
+            dir.display()
+        )
+    })?;
     let decision = ApprovalDecision {
         decided_at: Utc::now(),
         choice,
@@ -179,8 +191,9 @@ pub fn finish_request(root: &Path, request_id: &str) -> Result<()> {
         decisions_dir(root).join(format!("{request_id}.json")),
     ] {
         if path.exists() {
-            fs::remove_file(&path)
-                .with_context(|| format!("failed to remove approval IPC file {}", path.display()))?;
+            fs::remove_file(&path).with_context(|| {
+                format!("failed to remove approval IPC file {}", path.display())
+            })?;
         }
     }
     Ok(())
@@ -209,8 +222,12 @@ fn read_decision(root: &Path, request_id: &str) -> Result<Option<ApprovalChoice>
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("approval IPC path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create approval IPC directory {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create approval IPC directory {}",
+            parent.display()
+        )
+    })?;
     let temp = parent.join(format!(
         ".{}.{}.tmp",
         path.file_name()
@@ -270,7 +287,10 @@ mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
     fn root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("agentwatch-approval-ipc-{name}-{}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "agentwatch-approval-ipc-{name}-{}",
+            std::process::id()
+        ))
     }
 
     #[test]

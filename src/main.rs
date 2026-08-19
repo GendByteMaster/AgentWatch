@@ -1,5 +1,6 @@
 mod agent;
 mod approval;
+mod approval_ipc;
 mod attribution;
 mod dashboard;
 mod git;
