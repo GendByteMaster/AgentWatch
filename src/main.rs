@@ -1,5 +1,7 @@
+mod agent;
 mod git;
 mod policy;
+mod provider;
 mod risk;
 mod runner;
 mod session;
@@ -9,6 +11,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+
+use crate::provider::CodexProvider;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -60,6 +64,13 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Run Codex non-interactively through `codex exec` and record it as an agent event.
+    Codex {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(required = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Evaluate a file path against the active policy.
     CheckPath {
         target: PathBuf,
@@ -87,6 +98,7 @@ fn main() -> Result<()> {
         Command::Stop { path } => session::stop(&path),
         Command::Session { path } => session::show(&path),
         Command::Run { path, command } => runner::run(&path, &command),
+        Command::Codex { path, args } => agent::run(&path, CodexProvider, &args),
         Command::CheckPath { target, root } => {
             let evaluation = policy::evaluate_path(&root, &target)?;
             println!("decision: {}", evaluation.decision.label());
