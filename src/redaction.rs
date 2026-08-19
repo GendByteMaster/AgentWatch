@@ -34,49 +34,61 @@ static KNOWN_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid known-token redaction regex")
 });
 
-pub fn redact(text: &str) -> String {
-    if text.is_empty() {
-        return String::new();
-    }
-
-    let mut value = redact_private_key_blocks(text);
-    value = BEARER
-        .replace_all(&value, |caps: &Captures<'_>| format!("{}{}", &caps[1], REDACTED))
-        .into_owned();
-    value = KEY_VALUE
-        .replace_all(&value, |caps: &Captures<'_>| {
-            format!("{}{}{}", &caps[1], &caps[2], REDACTED)
-        })
-        .into_owned();
-    value = URL_CREDENTIAL
-        .replace_all(&value, |caps: &Captures<'_>| {
-            format!("{}{}{}", &caps[1], REDACTED, &caps[3])
-        })
-        .into_owned();
-    value = JWT.replace_all(&value, REDACTED).into_owned();
-    KNOWN_TOKEN.replace_all(&value, REDACTED).into_owned()
+#[derive(Debug, Default)]
+pub struct Redactor {
+    inside_private_key: bool,
 }
 
-fn redact_private_key_blocks(text: &str) -> String {
+impl Redactor {
+    pub fn redact(&mut self, text: &str) -> String {
+        if text.is_empty() {
+            return String::new();
+        }
+
+        let mut value = redact_private_key_blocks(text, &mut self.inside_private_key);
+        value = BEARER
+            .replace_all(&value, |caps: &Captures<'_>| {
+                format!("{}{}", &caps[1], REDACTED)
+            })
+            .into_owned();
+        value = KEY_VALUE
+            .replace_all(&value, |caps: &Captures<'_>| {
+                format!("{}{}{}", &caps[1], &caps[2], REDACTED)
+            })
+            .into_owned();
+        value = URL_CREDENTIAL
+            .replace_all(&value, |caps: &Captures<'_>| {
+                format!("{}{}{}", &caps[1], REDACTED, &caps[3])
+            })
+            .into_owned();
+        value = JWT.replace_all(&value, REDACTED).into_owned();
+        KNOWN_TOKEN.replace_all(&value, REDACTED).into_owned()
+    }
+}
+
+pub fn redact(text: &str) -> String {
+    Redactor::default().redact(text)
+}
+
+fn redact_private_key_blocks(text: &str, inside_private_key: &mut bool) -> String {
     let mut output = String::with_capacity(text.len());
-    let mut inside_private_key = false;
 
     for segment in text.split_inclusive('\n') {
         let line = segment.strip_suffix('\n').unwrap_or(segment);
 
-        if !inside_private_key && is_private_key_marker(line, "BEGIN") {
+        if !*inside_private_key && is_private_key_marker(line, "BEGIN") {
             output.push_str(diff_prefix(line));
             output.push_str(PRIVATE_KEY_REDACTED);
             if segment.ends_with('\n') {
                 output.push('\n');
             }
-            inside_private_key = true;
+            *inside_private_key = true;
             continue;
         }
 
-        if inside_private_key {
+        if *inside_private_key {
             if is_private_key_marker(line, "END") {
-                inside_private_key = false;
+                *inside_private_key = false;
             }
             continue;
         }
@@ -105,7 +117,7 @@ fn diff_prefix(line: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::redact;
+    use super::{Redactor, redact};
 
     #[test]
     fn redacts_secret_assignments() {
@@ -152,6 +164,19 @@ mod tests {
         assert!(value.contains("+[REDACTED PRIVATE KEY BLOCK]"));
         assert!(!value.contains("very-secret-material"));
         assert!(value.contains("+safe = true"));
+    }
+
+    #[test]
+    fn redacts_streamed_private_key_blocks_across_records() {
+        let mut redactor = Redactor::default();
+
+        assert_eq!(
+            redactor.redact("-----BEGIN PRIVATE KEY-----"),
+            "[REDACTED PRIVATE KEY BLOCK]"
+        );
+        assert_eq!(redactor.redact("very-secret-material"), "");
+        assert_eq!(redactor.redact("-----END PRIVATE KEY-----"), "");
+        assert_eq!(redactor.redact("safe output"), "safe output");
     }
 
     #[test]
