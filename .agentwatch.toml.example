@@ -1,0 +1,38 @@
+[paths]
+warn = [
+  "**/.env*",
+  "**/*auth*",
+  "**/*secret*",
+  "**/*token*",
+  "**/*credential*",
+  "**/*migration*",
+]
+
+deny = [
+  "**/*private_key*",
+  "**/*.pem",
+  "**/*.key",
+]
+
+ignore = [
+  ".git/**",
+  ".agentwatch/**",
+  "target/**",
+  "node_modules/**",
+  ".next/**",
+]
+
+[commands]
+warn = [
+  "git reset --hard",
+  "git clean",
+  "docker system prune",
+  "drop database",
+  "truncate table",
+]
+
+deny = [
+  "rm -rf /",
+  "rm -rf /*",
+  "format c:",
+]
