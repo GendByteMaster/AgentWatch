@@ -20,6 +20,7 @@ use ratatui::{
 
 use crate::{
     approval_ipc::{self, ApprovalChoice, ApprovalRequest},
+    companion::{self, CompanionSnapshot},
     output::{self, AgentOutputRecord},
     run_diff::{self, RunDiff},
     session::{SessionEvent, SessionMeta},
@@ -277,6 +278,8 @@ struct Data {
     output: Vec<AgentOutputRecord>,
     runs: Vec<AgentRun>,
     git: GitInfo,
+    companion: Option<CompanionSnapshot>,
+    companion_error: Option<String>,
 }
 
 pub fn run(root: &Path) -> Result<()> {
@@ -412,6 +415,10 @@ fn load(root: &Path) -> Result<Data> {
     let output = output::read_tail(root, &meta.started_at, output::DEFAULT_TAIL_BYTES)?;
     let runs = aggregate_runs(&events);
     let git = git_info(root);
+    let (companion, companion_error) = match companion::load_snapshot(root) {
+        Ok(snapshot) => (snapshot, None),
+        Err(error) => (None, Some(error.to_string())),
+    };
 
     Ok(Data {
         meta,
@@ -420,6 +427,8 @@ fn load(root: &Path) -> Result<Data> {
         output,
         runs,
         git,
+        companion,
+        companion_error,
     })
 }
 
@@ -597,6 +606,7 @@ fn draw(frame: &mut Frame, data: &Data, ui: &UiState) {
         .constraints([
             Constraint::Length(3),
             Constraint::Length(7),
+            Constraint::Length(9),
             Constraint::Min(14),
             Constraint::Length(1),
         ])
@@ -604,8 +614,9 @@ fn draw(frame: &mut Frame, data: &Data, ui: &UiState) {
 
     header(frame, layout[0], data);
     cards(frame, layout[1], data);
-    body(frame, layout[2], data, ui);
-    footer(frame, layout[3], ui);
+    codex_threads(frame, layout[2], data);
+    body(frame, layout[3], data, ui);
+    footer(frame, layout[4], ui);
     if let Some(request) = data.approvals.first() {
         approval_overlay(frame, request, data.approvals.len());
     }
@@ -824,6 +835,141 @@ fn card(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn codex_threads(frame: &mut Frame, area: Rect, data: &Data) {
+    if let Some(error) = &data.companion_error {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("Failed to read Codex companion state: {}", short(error, 96)),
+                Style::default().fg(Color::Red),
+            ))
+            .block(
+                Block::default()
+                    .title("Codex Threads — snapshot error")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red)),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let Some(snapshot) = &data.companion else {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Companion watcher is not active yet. Run `agentwatch codex-watch` in another terminal.",
+                Style::default().fg(Color::DarkGray),
+            ))
+            .block(Block::default().title("Codex Threads").borders(Borders::ALL)),
+            area,
+        );
+        return;
+    };
+
+    let state = if snapshot.connected {
+        "connected"
+    } else {
+        "disconnected"
+    };
+    let border = if snapshot.connected {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let mut title = format!(
+        "Codex Threads — {state} — poll {} — {} threads",
+        snapshot.last_poll.format("%H:%M:%S"),
+        snapshot.threads.len()
+    );
+    if let Some(error) = &snapshot.error {
+        title.push_str(&format!(" — {}", short(error, 48)));
+    }
+
+    let header = Row::new([
+        "Status",
+        "Thread",
+        "Latest Turn",
+        "Recent Activity",
+        "Updated",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
+    let visible = area.height.saturating_sub(3) as usize;
+    let rows = snapshot.threads.iter().take(visible).map(|thread| {
+        let label = thread
+            .name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!thread.preview.trim().is_empty()).then_some(thread.preview.as_str()))
+            .unwrap_or(thread.id.as_str());
+        let thread_label = format!("{} [{}]", short(label, 24), short(&thread.source, 10));
+        let latest_turn = thread
+            .latest_turn
+            .as_ref()
+            .map(|turn| format!("{} {}", turn.status, short(&turn.id, 12)))
+            .unwrap_or_else(|| "-".to_owned());
+        let activity = companion_activity(thread);
+        Row::new([
+            Cell::from(thread.status.clone()).style(companion_status_style(&thread.status)),
+            Cell::from(thread_label),
+            Cell::from(latest_turn),
+            Cell::from(activity),
+            Cell::from(unix_clock(thread.updated_at)),
+        ])
+    });
+
+    frame.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(12),
+                Constraint::Length(30),
+                Constraint::Length(24),
+                Constraint::Min(30),
+                Constraint::Length(10),
+            ],
+        )
+        .header(header)
+        .column_spacing(1)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        ),
+        area,
+    );
+}
+
+fn companion_activity(thread: &companion::CompanionThread) -> String {
+    if thread.recent_items.is_empty() {
+        return "no recent tool activity".to_owned();
+    }
+
+    thread
+        .recent_items
+        .iter()
+        .take(3)
+        .map(|item| format!("{}:{} {}", item.kind, item.status, short(&item.detail, 28)))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn companion_status_style(status: &str) -> Style {
+    let color = match status {
+        "active" => Color::Green,
+        "idle" => Color::Cyan,
+        "systemError" => Color::Red,
+        "notLoaded" => Color::DarkGray,
+        _ => Color::Yellow,
+    };
+    Style::default().fg(color)
+}
+
+fn unix_clock(timestamp: i64) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .map(|value| value.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
