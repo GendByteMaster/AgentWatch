@@ -590,7 +590,10 @@ fn status_color(ok: bool) -> Style {
 
 fn event_color(event: &SessionEvent) -> Color {
     if event.kind.contains("failed")
-        || event.risk.as_deref().is_some_and(|risk| risk.starts_with("deny"))
+        || event
+            .risk
+            .as_deref()
+            .is_some_and(|risk| risk.starts_with("deny"))
     {
         Color::Red
     } else if event.risk.is_some() {
@@ -619,7 +622,13 @@ fn short(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_owned();
     }
-    format!("{}…", value.chars().take(max.saturating_sub(1)).collect::<String>())
+    format!(
+        "{}…",
+        value
+            .chars()
+            .take(max.saturating_sub(1))
+            .collect::<String>()
+    )
 }
 
 fn bytes(value: u64) -> String {
