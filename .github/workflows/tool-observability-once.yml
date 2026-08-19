@@ -1,0 +1,55 @@
+name: Validate Tool Observability Once
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/tool-observability-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Apply tool observability patch
+        run: python .github/patch_tool_observability.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Apply Clippy fixes
+        run: cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged -- -D warnings
+
+      - name: Format after fixes
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features
+
+      - name: Commit validated changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src README.md Cargo.lock
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "feat(tui): add structured tool timeline"
+          git push
