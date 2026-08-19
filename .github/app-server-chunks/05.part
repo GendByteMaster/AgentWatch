@@ -1,0 +1,132 @@
+    });
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("failed to open AgentWatch approval gate stdin")?;
+    serde_json::to_writer(&mut stdin, &input).context("failed to encode approval request")?;
+    stdin.write_all(b"\n")?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for AgentWatch approval gate")?;
+    if !output.status.success() {
+        bail!("AgentWatch approval gate subprocess failed closed");
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        return Ok(true);
+    }
+    let value: Value = serde_json::from_str(text.trim())
+        .context("AgentWatch approval gate returned malformed output")?;
+    let decision = value
+        .get("hookSpecificOutput")
+        .and_then(|output| output.get("permissionDecision"))
+        .and_then(Value::as_str)
+        .unwrap_or("deny");
+    Ok(decision != "deny")
+}
+
+fn audit_unsupported_approval(root: &Path, run_id: &str, description: &str) -> Result<()> {
+    session::record_agent_lifecycle(
+        root,
+        "approval.denied",
+        run_id,
+        PROVIDER,
+        None,
+        description,
+        None,
+        None,
+        Some("deny:unsupported-app-server-approval".to_owned()),
+    )
+}
+
+fn is_server_request(message: &Value) -> bool {
+    message.get("method").is_some() && message.get("id").is_some()
+}
+
+fn canonical_root(root: &Path) -> String {
+    root.canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn capture_worktree(root: &Path) -> Option<WorktreeSnapshot> {
+    match WorktreeSnapshot::capture(root) {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            eprintln!("AgentWatch warning: App Server worktree snapshot unavailable: {error}");
+            None
+        }
+    }
+}
+
+fn record_run_artifacts(root: &Path, run_id: &str, before: Option<WorktreeSnapshot>) {
+    let Some(before) = before else {
+        return;
+    };
+    let after = match WorktreeSnapshot::capture(root) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("AgentWatch warning: final App Server worktree snapshot failed: {error}");
+            return;
+        }
+    };
+
+    match before.changes(root, &after) {
+        Ok(changes) => {
+            for change in changes {
+                if let Err(error) = session::record_agent_file(
+                    root,
+                    run_id,
+                    PROVIDER,
+                    change.kind.as_str(),
+                    &change.path,
+                ) {
+                    eprintln!(
+                        "AgentWatch warning: failed to record App Server file {}: {error}",
+                        change.path.display()
+                    );
+                }
+            }
+        }
+        Err(error) => eprintln!("AgentWatch warning: App Server attribution failed: {error}"),
+    }
+
+    match before.diff(root, &after) {
+        Ok(diff) => {
+            if let Err(error) = run_diff::persist(root, run_id, &diff) {
+                eprintln!("AgentWatch warning: failed to persist App Server run diff: {error}");
+            }
+        }
+        Err(error) => eprintln!("AgentWatch warning: App Server run diff failed: {error}"),
+    }
+}
+
+fn persist_app_run_meta(root: &Path, meta: &AppServerRunMeta) -> Result<()> {
+    let dir = root.join(".agentwatch/runs");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create App Server run directory {}", dir.display()))?;
+    let path = dir.join(format!("{}.app.json", safe_run_id(&meta.run_id)));
+    let bytes = serde_json::to_vec_pretty(meta).context("failed to serialize App Server run metadata")?;
+    fs::write(&path, bytes)
+        .with_context(|| format!("failed to persist App Server run metadata {}", path.display()))
+}
+
+fn safe_run_id(run_id: &str) -> String {
+    run_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
