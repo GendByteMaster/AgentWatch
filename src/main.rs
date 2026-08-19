@@ -11,7 +11,11 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "agentwatch", version, about = "Observe repository changes while coding")]
+#[command(
+    name = "agentwatch",
+    version,
+    about = "Observe repository changes while coding"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
