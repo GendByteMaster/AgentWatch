@@ -15,8 +15,7 @@ use crate::{
     output::AgentOutputLog,
     policy::{self, Decision},
     provider::AgentProvider,
-    run_diff,
-    session,
+    run_diff, session,
 };
 
 struct OutputChunk {
@@ -186,7 +185,9 @@ fn record_run_artifacts(
                 }
             }
             if failures > 0 {
-                eprintln!("AgentWatch warning: {failures} attributed file events were not persisted");
+                eprintln!(
+                    "AgentWatch warning: {failures} attributed file events were not persisted"
+                );
             }
         }
         Err(error) => {

@@ -67,6 +67,29 @@ agent.file.deleted
 
 Each event carries the corresponding `run_id`, allowing the TUI to show the net file changes associated with the selected agent run.
 
+### Per-run unified diff
+
+Each AgentWatch-controlled run also persists a dedicated diff artifact built from the worktree state immediately before and after execution.
+
+The snapshot uses a temporary Git index and tree objects, so the diff represents the run itself rather than the repository's current global `git diff`. Existing dirty changes are therefore not automatically attributed to the agent unless the run changes them further.
+
+In the TUI, select a run and press `d` to open the full diff viewer:
+
+```text
+Run Diff — run-... — +58 -11 — 3 files
+
+Files
+  src/api.rs       +42 -8
+  src/auth.rs      +11 -3
+  tests/api.rs     +5  -0
+
+Unified diff
+@@ -18,6 +18,12 @@
+ ...
+```
+
+The viewer supports line/page scrolling and syntax-oriented coloring for additions, removals, hunks, and file headers.
+
 ### Policy engine
 
 AgentWatch can evaluate both file paths and commands using configurable rules:
@@ -279,6 +302,7 @@ j / k             Down / Up aliases
 PageUp / PageDown scroll by 5 items
 Home / End        jump to boundary
  a                all runs / selected run output
+ d                open Run Diff for selected run
  r                refresh now
  q / Esc          quit
 ```
@@ -463,9 +487,12 @@ Session state lives inside the observed repository:
 
 ```text
 .agentwatch/
-├── session.json
-├── events.jsonl
-└── agent-output.jsonl
+├── session.json        # compact session metadata
+├── events.jsonl        # append-only lifecycle / filesystem / command events
+├── agent-output.jsonl  # append-only provider stdout/stderr records
+└── runs/               # per-run diff artifacts
+    ├── run-....diff
+    └── run-....json
 ```
 
 ### `session.json`

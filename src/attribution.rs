@@ -146,10 +146,8 @@ fn snapshot_tree(root: &Path) -> Result<Option<String>> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let index_path = env::temp_dir().join(format!(
-        "agentwatch-index-{}-{nonce}",
-        std::process::id()
-    ));
+    let index_path =
+        env::temp_dir().join(format!("agentwatch-index-{}-{nonce}", std::process::id()));
     let lock_path = PathBuf::from(format!("{}.lock", index_path.display()));
 
     let result = (|| -> Result<Option<String>> {
@@ -183,7 +181,9 @@ fn snapshot_tree(root: &Path) -> Result<Option<String>> {
             bail!("git write-tree failed while capturing run diff snapshot");
         }
 
-        Ok(Some(String::from_utf8_lossy(&tree.stdout).trim().to_owned()))
+        Ok(Some(
+            String::from_utf8_lossy(&tree.stdout).trim().to_owned(),
+        ))
     })();
 
     let _ = fs::remove_file(&index_path);

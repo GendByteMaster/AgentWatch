@@ -1,4 +1,7 @@
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -55,9 +58,14 @@ pub fn persist(root: &Path, run_id: &str, diff: &SnapshotDiff) -> Result<()> {
 
     fs::write(&patch_path, diff.patch.as_bytes())
         .with_context(|| format!("failed to persist run diff {}", patch_path.display()))?;
-    let bytes = serde_json::to_vec_pretty(&meta).context("failed to serialize run diff metadata")?;
-    fs::write(&meta_path, bytes)
-        .with_context(|| format!("failed to persist run diff metadata {}", meta_path.display()))
+    let bytes =
+        serde_json::to_vec_pretty(&meta).context("failed to serialize run diff metadata")?;
+    fs::write(&meta_path, bytes).with_context(|| {
+        format!(
+            "failed to persist run diff metadata {}",
+            meta_path.display()
+        )
+    })
 }
 
 pub fn load(root: &Path, run_id: &str) -> Result<Option<RunDiff>> {
@@ -71,11 +79,11 @@ pub fn load(root: &Path, run_id: &str) -> Result<Option<RunDiff>> {
 
     let patch = fs::read_to_string(&patch_path)
         .with_context(|| format!("failed to read run diff {}", patch_path.display()))?;
-    let meta = serde_json::from_slice(
-        &fs::read(&meta_path)
-            .with_context(|| format!("failed to read run diff metadata {}", meta_path.display()))?,
-    )
-    .context("failed to parse run diff metadata")?;
+    let meta =
+        serde_json::from_slice(&fs::read(&meta_path).with_context(|| {
+            format!("failed to read run diff metadata {}", meta_path.display())
+        })?)
+        .context("failed to parse run diff metadata")?;
 
     Ok(Some(RunDiff { meta, patch }))
 }
