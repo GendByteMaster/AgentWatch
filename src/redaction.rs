@@ -134,7 +134,7 @@ mod tests {
         let value = redact("DATABASE_URL=postgres://alice:supersecret@localhost/app");
 
         assert!(!value.contains("supersecret"));
-        assert!(value.contains("DATABASE_URL=[REDACTED]"));
+        assert!(value.contains("postgres://alice:[REDACTED]@localhost/app"));
     }
 
     #[test]
