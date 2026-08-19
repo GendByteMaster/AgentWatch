@@ -29,27 +29,16 @@ jobs:
           path = Path("src/dashboard.rs")
           text = path.read_text()
 
-          def replace_once(old: str, new: str) -> None:
-              global text
-              if text.count(old) != 1:
-                  raise SystemExit(f"expected exactly one match, got {text.count(old)} for:\n{old[:120]}")
-              text = text.replace(old, new, 1)
+          if "collections::{BTreeMap, BTreeSet}" not in text:
+              text = text.replace(
+                  "    collections::BTreeMap,\n",
+                  "    collections::{BTreeMap, BTreeSet},\n",
+                  1,
+              )
 
-          replace_once(
-              "    collections::BTreeMap,\n",
-              "    collections::{BTreeMap, BTreeSet},\n",
-          )
-
-          replace_once(
-              '''struct AgentRun {
-              id: String,
-              provider: String,
-              command: String,
-              started: DateTime<Utc>,
-              status: RunStatus,
-              duration_ms: Option<u64>,
-          }''',
-              '''struct AgentRun {
+          start = text.index("struct AgentRun {")
+          end = text.index("\n}\n\n#[derive(Debug, Default)]\nstruct GitInfo", start) + 2
+          text = text[:start] + '''struct AgentRun {
               id: String,
               provider: String,
               model: Option<String>,
@@ -60,43 +49,12 @@ jobs:
               duration_ms: Option<u64>,
               exit_code: Option<i32>,
               risk: Option<String>,
-          }''',
-          )
+          }''' + text[end:]
 
-          replace_once(
-              '''        let run = runs.entry(id.clone()).or_insert_with(|| AgentRun {
-              id,
-              provider: event.provider.clone().unwrap_or_else(|| "agent".into()),
-              command: event.command.clone().unwrap_or_default(),
-              started: event.timestamp,
-              status: RunStatus::Running,
-              duration_ms: None,
-          });
-
-          match event.kind.as_str() {
-              "agent.started" => {
-                  run.started = event.timestamp;
-                  run.provider = event
-                      .provider
-                      .clone()
-                      .unwrap_or_else(|| run.provider.clone());
-                  run.command = event.command.clone().unwrap_or_else(|| run.command.clone());
-              }
-              "agent.failed" => {
-                  run.status = RunStatus::Failed;
-                  run.duration_ms = event.duration_ms;
-              }
-              "agent.completed" | "agent" => {
-                  run.status = if event.exit_code.is_some_and(|code| code != 0) {
-                      RunStatus::Failed
-                  } else {
-                      RunStatus::Completed
-                  };
-                  run.duration_ms = event.duration_ms;
-              }
-              _ => {}
-          }''',
-              '''        let run = runs.entry(id.clone()).or_insert_with(|| AgentRun {
+          agg = text.index("fn aggregate_runs(")
+          start = text.index("        let run = runs.entry", agg)
+          end = text.index("    }\n\n    let mut runs", start)
+          replacement = '''        let run = runs.entry(id.clone()).or_insert_with(|| AgentRun {
               id,
               provider: event.provider.clone().unwrap_or_else(|| "agent".into()),
               model: event.model.clone(),
@@ -143,43 +101,26 @@ jobs:
                   run.exit_code = event.exit_code;
               }
               _ => {}
-          }''',
-          )
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
 
-          replace_once(
-              '''fn selected_run_id<'a>(data: &'a Data, ui: &UiState) -> Option<&'a str> {
-              data.runs.get(ui.selected_run).map(|run| run.id.as_str())
-          }''',
-              '''fn selected_run<'a>(data: &'a Data, ui: &UiState) -> Option<&'a AgentRun> {
+          start = text.index("fn selected_run_id")
+          end = text.index("fn output_matches", start)
+          selected_helpers = '''fn selected_run<'a>(data: &'a Data, ui: &UiState) -> Option<&'a AgentRun> {
               data.runs.get(ui.selected_run)
           }
 
           fn selected_run_id<'a>(data: &'a Data, ui: &UiState) -> Option<&'a str> {
               selected_run(data, ui).map(|run| run.id.as_str())
-          }''',
-          )
+          }
 
-          old_body = '''fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
-              let rows = Layout::default()
-                  .direction(Direction::Vertical)
-                  .constraints([
-                      Constraint::Percentage(50),
-                      Constraint::Percentage(30),
-                      Constraint::Percentage(20),
-                  ])
-                  .split(area);
-              let top = split(rows[0]);
-              let middle = split(rows[1]);
-              let bottom = split(rows[2]);
+          '''
+          text = text[:start] + selected_helpers + text[end:]
 
-              agents(frame, top[0], data, ui);
-              files(frame, top[1], data);
-              recent(frame, middle[0], data, ui);
-              tests(frame, middle[1], data);
-              tail(frame, bottom[0], data, ui);
-              session(frame, bottom[1], data);
-          }'''
-          new_body = '''fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
+          start = text.index("fn body(")
+          end = text.index("fn split(", start)
+          body = '''fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
               let columns = split(area);
               let left = Layout::default()
                   .direction(Direction::Vertical)
@@ -199,12 +140,15 @@ jobs:
               tail(frame, left[2], data, ui);
               files(frame, right[0], data);
               run_details(frame, right[1], data, ui);
-          }'''
-          replace_once(old_body, new_body)
+          }
 
-          start = text.index("fn tests(")
-          end = text.index("fn tail(", start)
-          text = text[:start] + text[end:]
+          '''
+          text = text[:start] + body + text[end:]
+
+          if "fn tests(" in text:
+              start = text.index("fn tests(")
+              end = text.index("fn tail(", start)
+              text = text[:start] + text[end:]
 
           start = text.index("fn session(")
           end = text.index("fn footer(", start)
@@ -322,16 +266,18 @@ jobs:
 
           readme_path = Path("README.md")
           readme = readme_path.read_text()
-          old = "- session event/output counts and storage size\n"
-          new = "- selected run details: model, exact command, timing, exit code, policy risk, and observed files\n"
-          if old not in readme:
-              raise SystemExit("README TUI bullet not found")
-          readme = readme.replace(old, new, 1)
+          readme = readme.replace(
+              "- session event/output counts and storage size\n",
+              "- selected run details: model, exact command, timing, exit code, policy risk, and observed files\n",
+              1,
+          )
           marker = "The selected agent run is highlighted, and the output panel filters to that run by default. You can switch the output panel back to all runs at any time.\n"
-          addition = marker + "\nThe `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.\n"
-          if marker not in readme:
-              raise SystemExit("README interaction paragraph not found")
-          readme = readme.replace(marker, addition, 1)
+          if "The `Run Details` panel follows the selected run." not in readme:
+              readme = readme.replace(
+                  marker,
+                  marker + "\nThe `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.\n",
+                  1,
+              )
           readme_path.write_text(readme)
           PY
 
