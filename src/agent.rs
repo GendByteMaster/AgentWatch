@@ -174,20 +174,18 @@ fn execute_agent(
     let mut terminal_warning_printed = false;
 
     for chunk in receiver {
-        if let Err(error) = write_terminal(chunk.stream, &chunk.bytes) {
-            if !terminal_warning_printed {
-                eprintln!("AgentWatch warning: failed to mirror agent output: {error}");
-                terminal_warning_printed = true;
-            }
+        if let Err(error) = write_terminal(chunk.stream, &chunk.bytes)
+            && !terminal_warning_printed
+        {
+            eprintln!("AgentWatch warning: failed to mirror agent output: {error}");
+            terminal_warning_printed = true;
         }
 
-        if let Err(error) =
-            output_log.append(run_id, provider, chunk.stream, &chunk.bytes)
+        if let Err(error) = output_log.append(run_id, provider, chunk.stream, &chunk.bytes)
+            && !log_warning_printed
         {
-            if !log_warning_printed {
-                eprintln!("AgentWatch warning: failed to persist agent output: {error}");
-                log_warning_printed = true;
-            }
+            eprintln!("AgentWatch warning: failed to persist agent output: {error}");
+            log_warning_printed = true;
         }
     }
 
@@ -231,10 +229,7 @@ fn write_terminal(stream: &str, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-fn report_reader_result(
-    stream: &str,
-    result: thread::Result<Result<()>>,
-) {
+fn report_reader_result(stream: &str, result: thread::Result<Result<()>>) {
     match result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
