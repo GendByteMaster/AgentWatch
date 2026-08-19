@@ -151,10 +151,7 @@ pub fn watch(root: &Path, interval_ms: u64, thread_limit: u32) -> Result<()> {
         match poll(&mut client, root, thread_limit, &tracker.known) {
             Ok(observations) => {
                 tracker.reconcile(root, &observations)?;
-                persist_snapshot(
-                    root,
-                    &snapshot_from(&observations, interval_ms, None),
-                )?;
+                persist_snapshot(root, &snapshot_from(&observations, interval_ms, None))?;
             }
             Err(error) => {
                 let message = format!("{error:#}");
@@ -201,8 +198,12 @@ pub fn load_snapshot(root: &Path) -> Result<Option<CompanionSnapshot>> {
     }
     let bytes = fs::read(&path)
         .with_context(|| format!("failed to read Codex companion snapshot {}", path.display()))?;
-    let snapshot = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse Codex companion snapshot {}", path.display()))?;
+    let snapshot = serde_json::from_slice(&bytes).with_context(|| {
+        format!(
+            "failed to parse Codex companion snapshot {}",
+            path.display()
+        )
+    })?;
     Ok(Some(snapshot))
 }
 
@@ -244,10 +245,7 @@ fn poll(
         });
 
         if needs_read {
-            match client.request(
-                "thread/read",
-                json!({"threadId": id, "includeTurns": true}),
-            ) {
+            match client.request("thread/read", json!({"threadId": id, "includeTurns": true})) {
                 Ok(read) => {
                     if let Some(thread) = read.get("thread") {
                         observations.push(parse_thread(thread)?);
@@ -382,11 +380,7 @@ fn emit_thread_event(root: &Path, thread: &ThreadObservation, state: &str) -> Re
     )
 }
 
-fn emit_turn_event(
-    root: &Path,
-    thread: &ThreadObservation,
-    turn: &TurnObservation,
-) -> Result<()> {
+fn emit_turn_event(root: &Path, thread: &ThreadObservation, turn: &TurnObservation) -> Result<()> {
     let kind = format!("codex.turn.{}", event_suffix(&turn.status));
     session::record_agent_lifecycle(
         root,
@@ -521,11 +515,13 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_owned(),
-            details: vec![value
-                .get("command")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown command")
-                .to_owned()],
+            details: vec![
+                value
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown command")
+                    .to_owned(),
+            ],
             exit_code: value
                 .get("exitCode")
                 .and_then(Value::as_i64)
@@ -593,22 +589,26 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
                 .to_owned(),
-            details: vec![value
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or("agent")
-                .to_owned()],
+            details: vec![
+                value
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("agent")
+                    .to_owned(),
+            ],
             exit_code: None,
         }),
         "webSearch" => Some(ItemObservation {
             id,
             kind: "web".to_owned(),
             status: "completed".to_owned(),
-            details: vec![value
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or("web search")
-                .to_owned()],
+            details: vec![
+                value
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .unwrap_or("web search")
+                    .to_owned(),
+            ],
             exit_code: None,
         }),
         _ => None,
@@ -688,8 +688,7 @@ fn persist_snapshot(root: &Path, snapshot: &CompanionSnapshot) -> Result<()> {
     let parent = path
         .parent()
         .context("Codex companion snapshot path has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create {}", parent.display()))?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
     let tmp = companion_tmp_path(root);
     let bytes = serde_json::to_vec_pretty(snapshot)
         .context("failed to serialize Codex companion snapshot")?;
