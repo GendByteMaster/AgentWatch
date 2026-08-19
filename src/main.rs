@@ -5,6 +5,7 @@ mod provider;
 mod risk;
 mod runner;
 mod session;
+mod tui;
 mod watcher;
 
 use std::path::PathBuf;
@@ -29,6 +30,11 @@ struct Cli {
 enum Command {
     /// Watch the current project for filesystem changes.
     Watch {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Open the live read-only AgentWatch terminal dashboard.
+    Tui {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -92,6 +98,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Watch { path } => watcher::watch(&path),
+        Command::Tui { path } => tui::run(&path),
         Command::Status { path } => git::status(&path),
         Command::Diff { path } => git::diff(&path),
         Command::Start { path } => session::start(&path),
