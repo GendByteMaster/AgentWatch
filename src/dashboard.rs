@@ -513,7 +513,10 @@ fn tests(frame: &mut Frame, area: Rect, data: &Data) {
         Line::styled(format!("Failed: {failed}"), status_color(failed == 0)),
     ];
     if let Some(last) = tests.last() {
-        lines.push(Line::raw(format!("Last:   {}", last.timestamp.format("%H:%M:%S"))));
+        lines.push(Line::raw(format!(
+            "Last:   {}",
+            last.timestamp.format("%H:%M:%S")
+        )));
     }
     frame.render_widget(
         Paragraph::new(lines).block(Block::default().title("Tests").borders(Borders::ALL)),
@@ -563,7 +566,10 @@ fn session(frame: &mut Frame, area: Rect, data: &Data) {
         Paragraph::new(vec![
             Line::raw(format!("Events: {}", data.events.len())),
             Line::raw(format!("Size:   {}", bytes(size))),
-            Line::raw(format!("Start:  {}", data.meta.started_at.format("%H:%M:%S"))),
+            Line::raw(format!(
+                "Start:  {}",
+                data.meta.started_at.format("%H:%M:%S")
+            )),
             Line::raw(format!("Path:   {}", data.meta.root.display())),
         ])
         .block(Block::default().title("Session Info").borders(Borders::ALL))
