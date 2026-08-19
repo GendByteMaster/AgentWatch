@@ -14,7 +14,7 @@ use crate::{
     attribution::WorktreeSnapshot,
     output::AgentOutputLog,
     policy::{self, Decision},
-    provider::AgentProvider,
+    provider::{AgentProvider, ProviderToolEvent, ToolKind},
     run_diff, session,
 };
 
@@ -24,7 +24,12 @@ struct OutputChunk {
 }
 
 pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> Result<()> {
-    let args = provider.build_args(user_args);
+    let observed = session::is_active(root)?;
+    let args = if observed {
+        provider.build_observed_args(user_args)
+    } else {
+        provider.build_args(user_args)
+    };
     let model = provider.model(user_args);
     let mut policy_command = Vec::with_capacity(args.len() + 1);
     policy_command.push(provider.executable().to_owned());
@@ -72,7 +77,7 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
     );
 
     let started = Instant::now();
-    let execution = execute_agent(root, provider.executable(), provider.name(), &args, &run_id);
+    let execution = execute_agent(root, &provider, &args, &run_id);
     let duration_ms = elapsed_ms(started);
 
     match execution {
@@ -207,13 +212,14 @@ fn record_run_artifacts(
     }
 }
 
-fn execute_agent(
+fn execute_agent<P: AgentProvider>(
     root: &Path,
-    executable: &str,
-    provider: &str,
+    provider: &P,
     args: &[String],
     run_id: &str,
 ) -> Result<ExitStatus> {
+    let executable = provider.executable();
+    let provider_name = provider.name();
     let Some(mut output_log) = AgentOutputLog::open_if_active(root)? else {
         return Command::new(executable)
             .args(args)
@@ -252,18 +258,24 @@ fn execute_agent(
     let mut terminal_warning_printed = false;
 
     for chunk in receiver {
-        if let Err(error) = write_terminal(chunk.stream, &chunk.bytes)
-            && !terminal_warning_printed
-        {
-            eprintln!("AgentWatch warning: failed to mirror agent output: {error}");
-            terminal_warning_printed = true;
-        }
+        let chunks = structured_output_chunks(root, provider, run_id, &chunk)
+            .unwrap_or_else(|| vec![chunk]);
 
-        if let Err(error) = output_log.append(run_id, provider, chunk.stream, &chunk.bytes)
-            && !log_warning_printed
-        {
-            eprintln!("AgentWatch warning: failed to persist agent output: {error}");
-            log_warning_printed = true;
+        for chunk in chunks {
+            if let Err(error) = write_terminal(chunk.stream, &chunk.bytes)
+                && !terminal_warning_printed
+            {
+                eprintln!("AgentWatch warning: failed to mirror agent output: {error}");
+                terminal_warning_printed = true;
+            }
+
+            if let Err(error) =
+                output_log.append(run_id, provider_name, chunk.stream, &chunk.bytes)
+                && !log_warning_printed
+            {
+                eprintln!("AgentWatch warning: failed to persist agent output: {error}");
+                log_warning_printed = true;
+            }
         }
     }
 
@@ -271,6 +283,121 @@ fn execute_agent(
     report_reader_result("stderr", stderr_thread.join());
 
     child.wait().context("failed to wait for agent process")
+}
+
+fn structured_output_chunks<P: AgentProvider>(
+    root: &Path,
+    provider: &P,
+    run_id: &str,
+    chunk: &OutputChunk,
+) -> Option<Vec<OutputChunk>> {
+    if chunk.stream != "stdout" {
+        return None;
+    }
+
+    let line = String::from_utf8_lossy(&chunk.bytes);
+    let line = line.trim_end_matches(['\r', '\n']);
+    let parsed = provider.parse_observed_stdout_line(line)?;
+
+    for tool in &parsed.tools {
+        if let Err(error) = record_tool_event(root, run_id, provider.name(), tool) {
+            eprintln!(
+                "AgentWatch warning: failed to persist {} tool event {}: {error}",
+                tool.kind.as_str(),
+                tool.id
+            );
+        }
+    }
+
+    Some(
+        parsed
+            .display
+            .into_iter()
+            .filter(|text| !text.is_empty())
+            .map(|text| OutputChunk {
+                stream: "stdout",
+                bytes: display_bytes(text),
+            })
+            .collect(),
+    )
+}
+
+fn record_tool_event(
+    root: &Path,
+    run_id: &str,
+    provider: &str,
+    tool: &ProviderToolEvent,
+) -> Result<()> {
+    let kind = format!("tool.{}.{}", tool.kind.as_str(), tool.phase.as_str());
+    let command = tool_event_description(tool);
+    let risk = tool_risk(root, tool)?;
+    session::record_agent_lifecycle(
+        root,
+        &kind,
+        run_id,
+        provider,
+        None,
+        &command,
+        tool.exit_code,
+        None,
+        risk,
+    )
+}
+
+fn tool_event_description(tool: &ProviderToolEvent) -> String {
+    match tool.kind {
+        ToolKind::Shell => tool.command.clone().unwrap_or_else(|| tool.id.clone()),
+        ToolKind::File => format!(
+            "{} {}",
+            tool.name.as_deref().unwrap_or("update"),
+            tool.path.as_deref().unwrap_or("unknown")
+        ),
+        ToolKind::Mcp => match (&tool.name, &tool.detail) {
+            (Some(name), Some(detail)) => format!("{name} {detail}"),
+            (Some(name), None) => name.clone(),
+            _ => tool.id.clone(),
+        },
+        ToolKind::Web => tool
+            .detail
+            .clone()
+            .or_else(|| tool.name.clone())
+            .unwrap_or_else(|| tool.id.clone()),
+    }
+}
+
+fn tool_risk(root: &Path, tool: &ProviderToolEvent) -> Result<Option<String>> {
+    let evaluation = match tool.kind {
+        ToolKind::File => {
+            let Some(path) = tool.path.as_deref() else {
+                return Ok(None);
+            };
+            policy::evaluate_path(root, Path::new(path))?
+        }
+        ToolKind::Shell => {
+            let Some(command) = tool.command.as_ref() else {
+                return Ok(None);
+            };
+            policy::evaluate_command(root, std::slice::from_ref(command))?
+        }
+        ToolKind::Mcp | ToolKind::Web => return Ok(None),
+    };
+
+    Ok(match evaluation.decision {
+        Decision::Warn | Decision::Deny => Some(format!(
+            "{}:{}",
+            evaluation.decision.label(),
+            evaluation.matched_rule.as_deref().unwrap_or("policy")
+        )),
+        Decision::Allow => None,
+    })
+}
+
+fn display_bytes(text: String) -> Vec<u8> {
+    let mut bytes = text.into_bytes();
+    if !bytes.ends_with(b"\n") {
+        bytes.push(b'\n');
+    }
+    bytes
 }
 
 fn stream_reader<R>(
