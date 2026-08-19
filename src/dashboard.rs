@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader},
     path::Path,
@@ -201,10 +201,14 @@ impl UiState {
 struct AgentRun {
     id: String,
     provider: String,
+    model: Option<String>,
     command: String,
     started: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
     status: RunStatus,
     duration_ms: Option<u64>,
+    exit_code: Option<i32>,
+    risk: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -337,24 +341,38 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
         let run = runs.entry(id.clone()).or_insert_with(|| AgentRun {
             id,
             provider: event.provider.clone().unwrap_or_else(|| "agent".into()),
+            model: event.model.clone(),
             command: event.command.clone().unwrap_or_default(),
             started: event.timestamp,
+            ended_at: None,
             status: RunStatus::Running,
             duration_ms: None,
+            exit_code: None,
+            risk: event.risk.clone(),
         });
+
+        if let Some(provider) = &event.provider {
+            run.provider = provider.clone();
+        }
+        if let Some(model) = &event.model {
+            run.model = Some(model.clone());
+        }
+        if let Some(command) = &event.command {
+            run.command = command.clone();
+        }
+        if let Some(risk) = &event.risk {
+            run.risk = Some(risk.clone());
+        }
 
         match event.kind.as_str() {
             "agent.started" => {
                 run.started = event.timestamp;
-                run.provider = event
-                    .provider
-                    .clone()
-                    .unwrap_or_else(|| run.provider.clone());
-                run.command = event.command.clone().unwrap_or_else(|| run.command.clone());
             }
             "agent.failed" => {
                 run.status = RunStatus::Failed;
+                run.ended_at = Some(event.timestamp);
                 run.duration_ms = event.duration_ms;
+                run.exit_code = event.exit_code;
             }
             "agent.completed" | "agent" => {
                 run.status = if event.exit_code.is_some_and(|code| code != 0) {
@@ -362,7 +380,9 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
                 } else {
                     RunStatus::Completed
                 };
+                run.ended_at = Some(event.timestamp);
                 run.duration_ms = event.duration_ms;
+                run.exit_code = event.exit_code;
             }
             _ => {}
         }
@@ -428,8 +448,12 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+fn selected_run<'a>(data: &'a Data, ui: &UiState) -> Option<&'a AgentRun> {
+    data.runs.get(ui.selected_run)
+}
+
 fn selected_run_id<'a>(data: &'a Data, ui: &UiState) -> Option<&'a str> {
-    data.runs.get(ui.selected_run).map(|run| run.id.as_str())
+    selected_run(data, ui).map(|run| run.id.as_str())
 }
 
 fn output_matches(record: &AgentOutputRecord, data: &Data, ui: &UiState) -> bool {
@@ -626,24 +650,25 @@ fn card(frame: &mut Frame, area: Rect, title: &str, lines: Vec<Line<'static>>) {
 }
 
 fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
-    let rows = Layout::default()
+    let columns = split(area);
+    let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Percentage(50),
+            Constraint::Percentage(45),
+            Constraint::Percentage(25),
             Constraint::Percentage(30),
-            Constraint::Percentage(20),
         ])
-        .split(area);
-    let top = split(rows[0]);
-    let middle = split(rows[1]);
-    let bottom = split(rows[2]);
+        .split(columns[0]);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+        .split(columns[1]);
 
-    agents(frame, top[0], data, ui);
-    files(frame, top[1], data);
-    recent(frame, middle[0], data, ui);
-    tests(frame, middle[1], data);
-    tail(frame, bottom[0], data, ui);
-    session(frame, bottom[1], data);
+    agents(frame, left[0], data, ui);
+    recent(frame, left[1], data, ui);
+    tail(frame, left[2], data, ui);
+    files(frame, right[0], data);
+    run_details(frame, right[1], data, ui);
 }
 
 fn split(area: Rect) -> std::rc::Rc<[Rect]> {
@@ -804,37 +829,6 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     );
 }
 
-fn tests(frame: &mut Frame, area: Rect, data: &Data) {
-    let tests: Vec<_> = data
-        .events
-        .iter()
-        .filter(|event| event.kind == "test")
-        .collect();
-    let passed = tests
-        .iter()
-        .filter(|event| event.exit_code == Some(0))
-        .count();
-    let failed = tests.len().saturating_sub(passed);
-    let mut lines = vec![
-        Line::raw(format!("Runs:   {}", tests.len())),
-        Line::styled(
-            format!("Passed: {passed}"),
-            Style::default().fg(Color::Green),
-        ),
-        Line::styled(format!("Failed: {failed}"), status_color(failed == 0)),
-    ];
-    if let Some(last) = tests.last() {
-        lines.push(Line::raw(format!(
-            "Last:   {}",
-            last.timestamp.format("%H:%M:%S")
-        )));
-    }
-    frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title("Tests").borders(Borders::ALL)),
-        area,
-    );
-}
-
 fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let limit = area.height.saturating_sub(2) as usize;
     let selected = selected_run_id(data, ui);
@@ -896,30 +890,119 @@ fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     );
 }
 
-fn session(frame: &mut Frame, area: Rect, data: &Data) {
-    let state = data.meta.root.join(".agentwatch");
-    let size = fs::read_dir(state)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.metadata().ok())
-        .filter(|meta| meta.is_file())
-        .map(|meta| meta.len())
-        .sum();
+fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
+    let Some(run) = selected_run(data, ui) else {
+        let state = data.meta.root.join(".agentwatch");
+        let size: u64 = fs::read_dir(state)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.metadata().ok())
+            .filter(|meta| meta.is_file())
+            .map(|meta| meta.len())
+            .sum();
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::styled(
+                    "No agent run selected yet",
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Line::raw(format!("Events: {}", data.events.len())),
+                Line::raw(format!("Output: {}", data.output.len())),
+                Line::raw(format!("Storage: {}", bytes(size))),
+                Line::raw(format!(
+                    "Session: {}",
+                    data.meta.started_at.format("%H:%M:%S")
+                )),
+                Line::raw(format!("Path: {}", data.meta.root.display())),
+            ])
+            .block(Block::default().title("Run Details").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    };
+
+    let end = run.ended_at.unwrap_or_else(Utc::now);
+    let observed_files: BTreeSet<_> = data
+        .events
+        .iter()
+        .filter(|event| event.timestamp >= run.started && event.timestamp <= end)
+        .filter_map(|event| event.path.as_ref())
+        .collect();
+    let (status, status_style) = match run.status {
+        RunStatus::Running => ("running", Style::default().fg(Color::Green)),
+        RunStatus::Completed => ("completed", Style::default().fg(Color::Green)),
+        RunStatus::Failed => ("failed", Style::default().fg(Color::Red)),
+    };
+    let policy = run.risk.as_deref().unwrap_or("allow");
+    let policy_style = if policy.starts_with("deny") {
+        Style::default().fg(Color::Red)
+    } else if policy.starts_with("warn") {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let ended = run
+        .ended_at
+        .map(|value| value.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "running".to_owned());
+    let elapsed = run
+        .duration_ms
+        .map(duration)
+        .unwrap_or_else(|| live_duration(run.started));
+    let exit = run
+        .exit_code
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "-".to_owned());
+
+    let mut lines = vec![
+        Line::raw(format!("Run ID: {}", run.id)),
+        Line::raw(format!("Provider: {}", run.provider)),
+        Line::raw(format!("Model: {}", run.model.as_deref().unwrap_or("-"))),
+        Line::from(vec![
+            Span::raw("Status: "),
+            Span::styled(status, status_style),
+        ]),
+        Line::raw(format!("Started: {}", run.started.format("%H:%M:%S"))),
+        Line::raw(format!("Ended: {ended}")),
+        Line::raw(format!("Duration: {elapsed}")),
+        Line::raw(format!("Exit code: {exit}")),
+        Line::from(vec![
+            Span::raw("Policy: "),
+            Span::styled(policy, policy_style),
+        ]),
+        Line::raw(format!("Command: {}", run.command)),
+        Line::raw(""),
+        Line::styled(
+            "Observed files (time window)",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+
+    let file_limit = area.height.saturating_sub(15) as usize;
+    if observed_files.is_empty() {
+        lines.push(Line::styled(
+            "  none recorded (watcher may be inactive)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        for path in observed_files.iter().take(file_limit) {
+            lines.push(Line::raw(format!("  {}", path.display())));
+        }
+        if observed_files.len() > file_limit {
+            lines.push(Line::styled(
+                format!("  +{} more", observed_files.len() - file_limit),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::raw(format!("Events: {}", data.events.len())),
-            Line::raw(format!("Output: {}", data.output.len())),
-            Line::raw(format!("Size:   {}", bytes(size))),
-            Line::raw(format!(
-                "Start:  {}",
-                data.meta.started_at.format("%H:%M:%S")
-            )),
-            Line::raw(format!("Path:   {}", data.meta.root.display())),
-        ])
-        .block(Block::default().title("Session Info").borders(Borders::ALL))
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(lines)
+            .block(Block::default().title("Run Details").borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
         area,
     );
 }

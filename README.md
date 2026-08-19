@@ -87,9 +87,11 @@ When an AgentWatch session is active, provider stdout/stderr is piped through a 
 - live/completed/failed agent runs
 - recent lifecycle/event records
 - live provider stdout/stderr
-- session event/output counts and storage size
+- selected run details: model, exact command, timing, exit code, policy risk, and observed files
 
 The interactive focus cycles through `Agents -> Events -> Output`. The selected agent run is highlighted, and the output panel filters to that run by default. You can switch the output panel back to all runs at any time.
+
+The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.
 
 Keys:
 
