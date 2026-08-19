@@ -80,8 +80,8 @@ pub fn load(root: &Path) -> Result<PolicyConfig> {
         return Ok(PolicyConfig::default());
     }
 
-    let source = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let source =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     toml::from_str(&source).with_context(|| format!("failed to parse {}", path.display()))
 }
 
@@ -203,9 +203,5 @@ fn default_warn_commands() -> Vec<String> {
 }
 
 fn default_deny_commands() -> Vec<String> {
-    vec![
-        "rm -rf /".into(),
-        "rm -rf /*".into(),
-        "format c:".into(),
-    ]
+    vec!["rm -rf /".into(), "rm -rf /*".into(), "format c:".into()]
 }
