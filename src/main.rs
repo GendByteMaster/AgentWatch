@@ -1,4 +1,5 @@
 mod agent;
+mod attribution;
 mod dashboard;
 mod git;
 mod output;
