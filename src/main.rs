@@ -3,6 +3,7 @@ mod app_server;
 mod approval;
 mod approval_ipc;
 mod attribution;
+mod codex_locator;
 mod companion;
 mod dashboard;
 mod git;
@@ -141,13 +142,17 @@ fn main() -> Result<()> {
         Command::Stop { path } => session::stop(&path),
         Command::Session { path } => session::show(&path),
         Command::Run { path, command } => runner::run(&path, &command),
-        Command::Codex { path, args } => agent::run(&path, CodexProvider, &args),
+        Command::Codex { path, args } => {
+            codex_locator::prepare_environment()?;
+            agent::run(&path, CodexProvider, &args)
+        }
         Command::CodexApp {
             path,
             thread,
             model,
             prompt,
         } => {
+            codex_locator::prepare_environment()?;
             let prompt = prompt.join(" ");
             app_server::run(&path, &prompt, thread.as_deref(), model.as_deref())
         }
@@ -155,7 +160,10 @@ fn main() -> Result<()> {
             path,
             interval_ms,
             threads,
-        } => companion::watch(&path, interval_ms, threads),
+        } => {
+            codex_locator::prepare_environment()?;
+            companion::watch(&path, interval_ms, threads)
+        }
         Command::CheckPath { target, root } => {
             let evaluation = policy::evaluate_path(&root, &target)?;
             println!("decision: {}", evaluation.decision.label());
