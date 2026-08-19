@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::session::SessionMeta;
+use crate::{redaction, session::SessionMeta};
 
 const OUTPUT_FILE: &str = "agent-output.jsonl";
 pub const DEFAULT_TAIL_BYTES: usize = 128 * 1024;
@@ -73,7 +73,7 @@ impl AgentOutputLog {
             run_id: run_id.to_owned(),
             provider: provider.to_owned(),
             stream: stream.to_owned(),
-            text,
+            text: redaction::redact(&text),
         };
         let mut encoded =
             serde_json::to_vec(&record).context("failed to serialize AgentWatch agent output")?;
