@@ -1,5 +1,6 @@
 mod git;
 mod risk;
+mod session;
 mod watcher;
 
 use std::path::PathBuf;
@@ -31,6 +32,21 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Start a persistent AgentWatch session.
+    Start {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Stop the current AgentWatch session and print a summary.
+    Stop {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Show the current or most recent AgentWatch session.
+    Session {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -40,5 +56,8 @@ fn main() -> Result<()> {
         Command::Watch { path } => watcher::watch(&path),
         Command::Status { path } => git::status(&path),
         Command::Diff { path } => git::diff(&path),
+        Command::Start { path } => session::start(&path),
+        Command::Stop { path } => session::stop(&path),
+        Command::Session { path } => session::show(&path),
     }
 }
