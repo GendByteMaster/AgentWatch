@@ -6,6 +6,7 @@ mod output;
 mod policy;
 mod provider;
 mod risk;
+mod run_diff;
 mod runner;
 mod session;
 mod watcher;
