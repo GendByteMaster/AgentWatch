@@ -38,6 +38,12 @@ pub struct SessionEvent {
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 pub fn start(root: &Path) -> Result<()> {
@@ -105,6 +111,9 @@ pub fn record_file(root: &Path, kind: impl Into<String>, path: &Path) -> Result<
             command: None,
             exit_code: None,
             provider: None,
+            model: None,
+            run_id: None,
+            duration_ms: None,
         },
     )
 }
@@ -135,15 +144,23 @@ pub fn record_command(
             command: Some(command),
             exit_code: Some(exit_code),
             provider: None,
+            model: None,
+            run_id: None,
+            duration_ms: None,
         },
     )
 }
 
-pub fn record_agent(
+#[allow(clippy::too_many_arguments)]
+pub fn record_agent_lifecycle(
     root: &Path,
-    provider: String,
-    command: String,
-    exit_code: i32,
+    kind: &str,
+    run_id: &str,
+    provider: &str,
+    model: Option<&str>,
+    command: &str,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
     risk: Option<String>,
 ) -> Result<()> {
     if !is_active(root)? {
@@ -155,12 +172,15 @@ pub fn record_agent(
         SessionEvent {
             id: event_id(),
             timestamp: Utc::now(),
-            kind: "agent".into(),
+            kind: kind.to_owned(),
             path: None,
             risk,
-            command: Some(command),
-            exit_code: Some(exit_code),
-            provider: Some(provider),
+            command: Some(command.to_owned()),
+            exit_code,
+            provider: Some(provider.to_owned()),
+            model: model.map(str::to_owned),
+            run_id: Some(run_id.to_owned()),
+            duration_ms,
         },
     )
 }
@@ -212,14 +232,39 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
         .iter()
         .filter(|event| event.exit_code.unwrap_or(1) != 0)
         .count();
-    let agents: Vec<_> = events
+    let terminal_agents: Vec<_> = events
         .iter()
-        .filter(|event| event.kind == "agent")
+        .filter(|event| {
+            matches!(
+                event.kind.as_str(),
+                "agent.completed" | "agent.failed" | "agent"
+            )
+        })
         .collect();
-    let providers: BTreeSet<_> = agents
+    let failed_agents = terminal_agents
+        .iter()
+        .filter(|event| {
+            event.kind == "agent.failed" || event.exit_code.is_some_and(|code| code != 0)
+        })
+        .count();
+    let providers: BTreeSet<_> = terminal_agents
         .iter()
         .filter_map(|event| event.provider.as_deref())
         .collect();
+    let total_agent_ms: u64 = terminal_agents
+        .iter()
+        .filter_map(|event| event.duration_ms)
+        .sum();
+    let started_run_ids: BTreeSet<_> = events
+        .iter()
+        .filter(|event| event.kind == "agent.started")
+        .filter_map(|event| event.run_id.as_deref())
+        .collect();
+    let terminal_run_ids: BTreeSet<_> = terminal_agents
+        .iter()
+        .filter_map(|event| event.run_id.as_deref())
+        .collect();
+    let unfinished_agents = started_run_ids.difference(&terminal_run_ids).count();
     let (added, removed) = diff_stats(root).unwrap_or((0, 0));
 
     println!("AgentWatch session");
@@ -238,7 +283,15 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
     println!("git diff: +{} -{}", added, removed);
     println!("commands: {}", commands);
     println!("tests: {} ({} failed)", tests.len(), failed_tests);
-    println!("agent runs: {}", agents.len());
+    println!(
+        "agent runs: {} ({} failed, {} unfinished)",
+        terminal_agents.len(),
+        failed_agents,
+        unfinished_agents
+    );
+    if total_agent_ms > 0 {
+        println!("agent time: {}ms", total_agent_ms);
+    }
     if !providers.is_empty() {
         println!(
             "providers: {}",
