@@ -1,0 +1,150 @@
+                }
+                "item/completed" => {
+                    if let Some(item) = params.get("item") {
+                        if let Some(item_id) = item.get("id").and_then(Value::as_str) {
+                            state.flush_item(run_id, item_id);
+                        }
+                        record_item(root, run_id, item, false, state)?;
+                    }
+                }
+                "turn/diff/updated" => {
+                    if let Some(diff) = params.get("diff").and_then(Value::as_str) {
+                        session::record_agent_lifecycle(
+                            root,
+                            "turn.diff.updated",
+                            run_id,
+                            PROVIDER,
+                            None,
+                            &format!("{} bytes", diff.len()),
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+                "error" => {
+                    if let Some(message) = params
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                    {
+                        eprintln!("Codex App Server error: {message}");
+                    }
+                }
+                "turn/completed" => {
+                    let event_thread = params
+                        .get("threadId")
+                        .and_then(Value::as_str)
+                        .unwrap_or(thread_id);
+                    let turn = params.get("turn").unwrap_or(&Value::Null);
+                    let event_turn = turn.get("id").and_then(Value::as_str).unwrap_or(turn_id);
+                    if event_thread != thread_id || event_turn != turn_id {
+                        continue;
+                    }
+                    let status = turn
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    let error = turn
+                        .get("error")
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    return Ok(TurnOutcome { status, error });
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn handle_server_request(
+        &mut self,
+        root: &Path,
+        run_id: &str,
+        state: &RunState,
+        message: &Value,
+    ) -> Result<()> {
+        let request_id = message
+            .get("id")
+            .cloned()
+            .context("Codex App Server request omitted id")?;
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .context("Codex App Server request omitted method")?;
+        let params = message.get("params").cloned().unwrap_or(Value::Null);
+
+        match method {
+            "item/commandExecution/requestApproval" => {
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("command-approval");
+                if params
+                    .get("additionalPermissions")
+                    .is_some_and(|permissions| !permissions.is_null())
+                {
+                    audit_unsupported_approval(root, run_id, "command approval with additional permissions")?;
+                    return self.respond(request_id, json!({"decision": "decline"}));
+                }
+                let Some(command) = params.get("command").and_then(Value::as_str) else {
+                    audit_unsupported_approval(root, run_id, "network-only command approval")?;
+                    return self.respond(request_id, json!({"decision": "decline"}));
+                };
+                let allowed = approval_gate_decision(
+                    root,
+                    run_id,
+                    "shell",
+                    item_id,
+                    json!({"command": command}),
+                )?;
+                self.respond(
+                    request_id,
+                    json!({"decision": if allowed { "accept" } else { "decline" }}),
+                )
+            }
+            "item/fileChange/requestApproval" => {
+                let item_id = params
+                    .get("itemId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("file-approval");
+                let mut paths = state
+                    .pending_file_paths
+                    .get(item_id)
+                    .cloned()
+                    .unwrap_or_default();
+                if paths.is_empty()
+                    && let Some(root) = params.get("grantRoot").and_then(Value::as_str)
+                {
+                    paths.push(root.to_owned());
+                }
+                if paths.is_empty() {
+                    audit_unsupported_approval(root, run_id, "file approval without paths")?;
+                    return self.respond(request_id, json!({"decision": "decline"}));
+                }
+                let tool_input = json!({
+                    "changes": paths
+                        .iter()
+                        .map(|path| json!({"path": path}))
+                        .collect::<Vec<_>>()
+                });
+                let allowed = approval_gate_decision(root, run_id, "file", item_id, tool_input)?;
+                self.respond(
+                    request_id,
+                    json!({"decision": if allowed { "accept" } else { "decline" }}),
+                )
+            }
+            "item/permissions/requestApproval" => {
+                audit_unsupported_approval(root, run_id, "permission-profile escalation")?;
+                self.respond(
+                    request_id,
+                    json!({"scope": "turn", "permissions": {}}),
+                )
+            }
+            _ => self.respond_error(
+                request_id,
+                -32601,
+                &format!("AgentWatch does not support App Server request `{method}` yet"),
+            ),
+        }
