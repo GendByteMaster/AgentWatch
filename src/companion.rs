@@ -120,6 +120,7 @@ pub fn watch(root: &Path, interval_ms: u64, thread_limit: u32) -> Result<()> {
     let thread_limit = thread_limit.clamp(1, MAX_THREADS);
     let interval = Duration::from_millis(interval_ms);
     let canonical_root = canonical_root(root);
+    let previous_snapshot = load_snapshot(root)?;
 
     let mut client = ReadOnlyAppServer::spawn(root)?;
     client.initialize()?;
@@ -135,6 +136,13 @@ pub fn watch(root: &Path, interval_ms: u64, thread_limit: u32) -> Result<()> {
     println!("Repository: {canonical_root}");
     println!("Mode: read-only thread/list + thread/read");
     println!("Poll: {interval_ms}ms, recent threads: {thread_limit}");
+    if let Some(snapshot) = previous_snapshot {
+        println!(
+            "Previous snapshot: {} threads at {}",
+            snapshot.threads.len(),
+            snapshot.last_poll
+        );
+    }
     println!("Use Codex App normally; Ctrl+C stops only the companion watcher.");
 
     loop {
