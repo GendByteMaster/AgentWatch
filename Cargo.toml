@@ -1,0 +1,12 @@
+[package]
+name = "agentwatch"
+version = "0.1.0"
+edition = "2024"
+description = "Observe repository changes made by humans and coding agents"
+license = "MIT"
+repository = "https://github.com/GendByteMaster/AgentWatch"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+notify = "8"
