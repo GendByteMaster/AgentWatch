@@ -181,7 +181,7 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
     }
 
     let mut runs: Vec<_> = runs.into_values().collect();
-    runs.sort_by(|a, b| b.started.cmp(&a.started));
+    runs.sort_by_key(|run| std::cmp::Reverse(run.started));
     runs
 }
 
