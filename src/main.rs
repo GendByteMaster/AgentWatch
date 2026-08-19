@@ -1,11 +1,11 @@
 mod agent;
+mod dashboard;
 mod git;
 mod policy;
 mod provider;
 mod risk;
 mod runner;
 mod session;
-mod tui;
 mod watcher;
 
 use std::path::PathBuf;
@@ -98,7 +98,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Watch { path } => watcher::watch(&path),
-        Command::Tui { path } => tui::run(&path),
+        Command::Tui { path } => dashboard::run(&path),
         Command::Status { path } => git::status(&path),
         Command::Diff { path } => git::diff(&path),
         Command::Start { path } => session::start(&path),
