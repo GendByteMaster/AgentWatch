@@ -121,6 +121,36 @@ Private-key redaction is stream-aware, so a multi-line key remains suppressed ev
 
 Redaction is deliberately safety-by-default, but it is still pattern-based rather than a full DLP system. Existing artifacts created before this feature are not rewritten retroactively.
 
+### Approval Gate
+
+For an active Codex run, AgentWatch can enforce the repository policy **before a tool action executes** by installing a session-scoped Codex `PreToolUse` hook.
+
+Policy decisions map to the gate as follows:
+
+```text
+allow  -> continue automatically
+warn   -> require a human decision
+deny   -> block the tool action
+```
+
+A warning opens an approval prompt in the same terminal that launched `agentwatch codex`:
+
+```text
+AgentWatch approval required
+Tool: shell
+Action: git reset --hard HEAD
+Reason: command matched warning policy `git reset --hard`
+[a] Allow once  [s] Allow for session  [d] Deny >
+```
+
+`Allow for session` grants only the matched warning rule for the current AgentWatch session. Grants are cleared when the next session starts. Deny rules cannot be overridden. If a warning requires approval but no interactive terminal is available, the gate fails closed and blocks the action.
+
+Every decision is appended to `events.jsonl` as `approval.requested`, `approval.allowed`, or `approval.denied` with the active `run_id`.
+
+The current Codex adapter injects the hook as a per-invocation config override and uses Codex's hook-trust bypass flag so the generated session hook can run without a persisted trust record. That flag applies to enabled untrusted hooks for the same Codex invocation, so repositories with additional Codex hooks should review them before using the gate. A future native app-server approval transport can remove this adapter-level limitation.
+
+The TUI remains read-only in this version: approval decisions are made in the invoking terminal, while the TUI observes the resulting audit events.
+
 ### Policy engine
 
 AgentWatch can evaluate both file paths and commands using configurable rules:
@@ -235,6 +265,7 @@ That is enough to get:
 - run-scoped net file attribution
 - live TUI updates
 - secret redaction for newly persisted output, command metadata, and run diffs
+- pre-tool Approval Gate for policy warnings and denials during active Codex runs
 
 `agentwatch watch` is optional. It adds ambient realtime filesystem events for changes made by all writers in the repository.
 
@@ -456,6 +487,10 @@ If the file does not exist, built-in safe defaults are used.
 Example configuration:
 
 ```toml
+[approvals]
+enabled = true
+timeout_seconds = 600
+
 [paths]
 warn = [
   "**/.env*",
@@ -502,7 +537,9 @@ deny → warn → allow
 
 A denied provider command is blocked before execution.
 
-A warning is recorded and printed, but execution continues.
+For the top-level provider command, a warning is recorded and execution continues. For tool actions inside an active Codex run, an enabled Approval Gate turns warning matches into interactive approval requests and blocks deny matches before the tool executes.
+
+Approval gating is enabled by default. Set `[approvals].enabled = false` to return tool-level policy handling to observation-only mode. `timeout_seconds` controls how long Codex allows the injected approval hook to run.
 
 You can inspect policy decisions without executing anything:
 
@@ -522,6 +559,7 @@ Session state lives inside the observed repository:
 ├── session.json        # compact session metadata
 ├── events.jsonl        # append-only lifecycle / filesystem / command events
 ├── agent-output.jsonl  # append-only provider stdout/stderr records
+├── approval-grants/    # current-session warning-rule grants
 └── runs/               # per-run diff artifacts
     ├── run-....diff
     └── run-....json
@@ -548,6 +586,7 @@ Append-only structured events including:
 - policy events
 - provider lifecycle events
 - run-scoped file attribution
+- structured tool events and approval audit events
 
 ### `agent-output.jsonl`
 

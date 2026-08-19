@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::{
+    approval,
     attribution::WorktreeSnapshot,
     output::AgentOutputLog,
     policy::{self, Decision},
@@ -25,7 +26,30 @@ struct OutputChunk {
 
 pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> Result<()> {
     let observed = session::is_active(root)?;
-    let args = if observed {
+    let approval_policy = policy::load(root)?.approvals;
+    let approval_gate = observed && approval_policy.enabled && provider.supports_approval_gate();
+
+    if approval_gate
+        && user_args.iter().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--dangerously-bypass-approvals-and-sandbox" | "--yolo"
+            )
+        })
+    {
+        bail!(
+            "Codex approval bypass flags are incompatible with the AgentWatch Approval Gate; disable `[approvals].enabled` or remove the bypass flag"
+        );
+    }
+
+    let args = if approval_gate {
+        let hook_command = approval::hook_command()?;
+        provider.build_observed_args_with_approval(
+            user_args,
+            &hook_command,
+            approval_policy.timeout_seconds,
+        )
+    } else if observed {
         provider.build_observed_args(user_args)
     } else {
         provider.build_args(user_args)
@@ -75,9 +99,14 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
         "AgentWatch running {} [{run_id}]: {display}",
         provider.name()
     );
+    if approval_gate {
+        println!(
+            "AgentWatch Approval Gate active: warning actions require confirmation; denied actions are blocked"
+        );
+    }
 
     let started = Instant::now();
-    let execution = execute_agent(root, &provider, &args, &run_id);
+    let execution = execute_agent(root, &provider, &args, &run_id, approval_gate);
     let duration_ms = elapsed_ms(started);
 
     match execution {
@@ -217,6 +246,7 @@ fn execute_agent<P: AgentProvider>(
     provider: &P,
     args: &[String],
     run_id: &str,
+    approval_gate: bool,
 ) -> Result<ExitStatus> {
     let executable = provider.executable();
     let provider_name = provider.name();
@@ -231,14 +261,19 @@ fn execute_agent<P: AgentProvider>(
             .context("failed to start agent process");
     };
 
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .current_dir(root)
         .stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start agent process")?;
+        .stderr(Stdio::piped());
+    if approval_gate {
+        let approval_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        command.env("AGENTWATCH_ROOT", approval_root);
+        command.env("AGENTWATCH_RUN_ID", run_id);
+    }
+    let mut child = command.spawn().context("failed to start agent process")?;
 
     let stdout = child
         .stdout

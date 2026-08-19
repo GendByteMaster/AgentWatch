@@ -63,6 +63,19 @@ pub trait AgentProvider {
         self.build_args(user_args)
     }
 
+    fn supports_approval_gate(&self) -> bool {
+        false
+    }
+
+    fn build_observed_args_with_approval(
+        &self,
+        user_args: &[String],
+        _hook_command: &str,
+        _timeout_seconds: u64,
+    ) -> Vec<String> {
+        self.build_observed_args(user_args)
+    }
+
     fn parse_observed_stdout_line(&self, _line: &str) -> Option<ParsedProviderLine> {
         None
     }
@@ -101,6 +114,28 @@ impl AgentProvider for CodexProvider {
         args
     }
 
+    fn supports_approval_gate(&self) -> bool {
+        true
+    }
+
+    fn build_observed_args_with_approval(
+        &self,
+        user_args: &[String],
+        hook_command: &str,
+        timeout_seconds: u64,
+    ) -> Vec<String> {
+        let mut args = Vec::with_capacity(user_args.len() + 6);
+        args.push("-c".to_owned());
+        args.push(codex_pre_tool_hook_override(hook_command, timeout_seconds));
+        args.push("--dangerously-bypass-hook-trust".to_owned());
+        args.push("exec".to_owned());
+        if !user_args.iter().any(|arg| arg == "--json") {
+            args.push("--json".to_owned());
+        }
+        args.extend(user_args.iter().cloned());
+        args
+    }
+
     fn parse_observed_stdout_line(&self, line: &str) -> Option<ParsedProviderLine> {
         parse_codex_jsonl(line)
     }
@@ -111,6 +146,14 @@ impl AgentProvider for CodexProvider {
             _ => None,
         })
     }
+}
+
+fn codex_pre_tool_hook_override(hook_command: &str, timeout_seconds: u64) -> String {
+    let command = serde_json::to_string(hook_command).expect("serializing a string cannot fail");
+    let timeout_seconds = timeout_seconds.clamp(10, 3600);
+    format!(
+        "hooks.PreToolUse=[{{matcher=\"*\",hooks=[{{type=\"command\",command={command},timeout={timeout_seconds}}}]}}]"
+    )
 }
 
 fn parse_codex_jsonl(line: &str) -> Option<ParsedProviderLine> {
@@ -338,6 +381,21 @@ mod tests {
             provider.build_observed_args(&["--json".into(), "hello".into()]),
             ["exec", "--json", "hello"]
         );
+    }
+
+    #[test]
+    fn gated_codex_args_inject_pre_tool_hook() {
+        let provider = CodexProvider;
+        let args = provider.build_observed_args_with_approval(
+            &["hello".into()],
+            "/tmp/agentwatch approval-hook",
+            600,
+        );
+        assert_eq!(args[0], "-c");
+        assert!(args[1].contains("hooks.PreToolUse"));
+        assert!(args[1].contains("approval-hook"));
+        assert_eq!(args[2], "--dangerously-bypass-hook-trust");
+        assert_eq!(&args[3..], ["exec", "--json", "hello"]);
     }
 
     #[test]

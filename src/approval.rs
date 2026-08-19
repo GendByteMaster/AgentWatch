@@ -84,13 +84,7 @@ fn handle_hook() -> Result<Option<String>> {
             reason,
             risk,
         } => {
-            record_event(
-                &root,
-                "approval.denied",
-                &run_id,
-                &description,
-                Some(risk),
-            );
+            record_event(&root, "approval.denied", &run_id, &description, Some(risk));
             Ok(Some(reason))
         }
         GateEvaluation::Prompt {
@@ -142,13 +136,7 @@ fn handle_hook() -> Result<Option<String>> {
                     Ok(None)
                 }
                 UserDecision::Deny => {
-                    record_event(
-                        &root,
-                        "approval.denied",
-                        &run_id,
-                        &description,
-                        Some(risk),
-                    );
+                    record_event(&root, "approval.denied", &run_id, &description, Some(risk));
                     Ok(Some(format!("AgentWatch denied tool use: {reason}")))
                 }
             }
@@ -286,11 +274,7 @@ fn parse_patch_paths(text: &str, paths: &mut Vec<String>) {
     }
 }
 
-fn prompt_user(
-    input: &PreToolUseInput,
-    description: &str,
-    reason: &str,
-) -> Result<UserDecision> {
+fn prompt_user(input: &PreToolUseInput, description: &str, reason: &str) -> Result<UserDecision> {
     let (reader, mut writer) = open_tty()?;
     writeln!(writer)?;
     writeln!(writer, "AgentWatch approval required")?;
@@ -358,15 +342,17 @@ fn has_session_grant(root: &Path, key: &str) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
     }
-    Ok(fs::read_to_string(path)
-        .context("failed to read AgentWatch approval grant")?
-        == key)
+    Ok(fs::read_to_string(path).context("failed to read AgentWatch approval grant")? == key)
 }
 
 fn persist_session_grant(root: &Path, key: &str) -> Result<()> {
     let dir = grants_dir(root);
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create approval grant directory {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| {
+        format!(
+            "failed to create approval grant directory {}",
+            dir.display()
+        )
+    })?;
     fs::write(grant_path(root, key), key).context("failed to persist AgentWatch session approval")
 }
 
@@ -391,7 +377,10 @@ fn record_event(root: &Path, kind: &str, run_id: &str, description: &str, risk: 
         None,
         risk,
     ) {
-        let _ = writeln!(std::io::stderr(), "AgentWatch approval audit warning: {error}");
+        let _ = writeln!(
+            std::io::stderr(),
+            "AgentWatch approval audit warning: {error}"
+        );
     }
 }
 
@@ -447,7 +436,10 @@ mod tests {
 
     #[test]
     fn grant_hash_is_deterministic() {
-        assert_eq!(fnv1a64(b"command:git reset --hard"), fnv1a64(b"command:git reset --hard"));
+        assert_eq!(
+            fnv1a64(b"command:git reset --hard"),
+            fnv1a64(b"command:git reset --hard")
+        );
         assert_ne!(fnv1a64(b"command:a"), fnv1a64(b"command:b"));
     }
 }

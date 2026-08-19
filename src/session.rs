@@ -60,6 +60,7 @@ pub fn start(root: &Path) -> Result<()> {
 
     let dir = state_dir(root);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    crate::approval::clear_session_grants(root)?;
     fs::write(events_file(root), b"").context("failed to reset AgentWatch event log")?;
 
     let meta = SessionMeta {
