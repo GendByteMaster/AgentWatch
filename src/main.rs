@@ -3,6 +3,7 @@ mod app_server;
 mod approval;
 mod approval_ipc;
 mod attribution;
+mod companion;
 mod dashboard;
 mod git;
 mod output;
@@ -98,6 +99,18 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         prompt: Vec<String>,
     },
+    /// Observe Codex App threads read-only while continuing to work in Codex App.
+    #[command(name = "codex-watch")]
+    CodexWatch {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        /// Poll interval in milliseconds. Values are clamped to 500..60000.
+        #[arg(long, default_value_t = 1500)]
+        interval_ms: u64,
+        /// Number of recent repository threads to inspect. Values are clamped to 1..100.
+        #[arg(long, default_value_t = 12)]
+        threads: u32,
+    },
     /// Evaluate a file path against the active policy.
     CheckPath {
         target: PathBuf,
@@ -138,6 +151,11 @@ fn main() -> Result<()> {
             let prompt = prompt.join(" ");
             app_server::run(&path, &prompt, thread.as_deref(), model.as_deref())
         }
+        Command::CodexWatch {
+            path,
+            interval_ms,
+            threads,
+        } => companion::watch(&path, interval_ms, threads),
         Command::CheckPath { target, root } => {
             let evaluation = policy::evaluate_path(&root, &target)?;
             println!("decision: {}", evaluation.decision.label());
