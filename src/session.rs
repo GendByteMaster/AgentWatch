@@ -36,6 +36,8 @@ pub struct SessionEvent {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 pub fn start(root: &Path) -> Result<()> {
@@ -102,6 +104,7 @@ pub fn record_file(root: &Path, kind: impl Into<String>, path: &Path) -> Result<
             risk,
             command: None,
             exit_code: None,
+            provider: None,
         },
     )
 }
@@ -131,6 +134,33 @@ pub fn record_command(
             risk,
             command: Some(command),
             exit_code: Some(exit_code),
+            provider: None,
+        },
+    )
+}
+
+pub fn record_agent(
+    root: &Path,
+    provider: String,
+    command: String,
+    exit_code: i32,
+    risk: Option<String>,
+) -> Result<()> {
+    if !is_active(root)? {
+        return Ok(());
+    }
+
+    append_event(
+        root,
+        SessionEvent {
+            id: event_id(),
+            timestamp: Utc::now(),
+            kind: "agent".into(),
+            path: None,
+            risk,
+            command: Some(command),
+            exit_code: Some(exit_code),
+            provider: Some(provider),
         },
     )
 }
@@ -182,6 +212,11 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
         .iter()
         .filter(|event| event.exit_code.unwrap_or(1) != 0)
         .count();
+    let agents: Vec<_> = events.iter().filter(|event| event.kind == "agent").collect();
+    let providers: BTreeSet<_> = agents
+        .iter()
+        .filter_map(|event| event.provider.as_deref())
+        .collect();
     let (added, removed) = diff_stats(root).unwrap_or((0, 0));
 
     println!("AgentWatch session");
@@ -200,6 +235,13 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
     println!("git diff: +{} -{}", added, removed);
     println!("commands: {}", commands);
     println!("tests: {} ({} failed)", tests.len(), failed_tests);
+    println!("agent runs: {}", agents.len());
+    if !providers.is_empty() {
+        println!(
+            "providers: {}",
+            providers.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
     println!("policy events: {}", risks);
 
     if !files.is_empty() {
