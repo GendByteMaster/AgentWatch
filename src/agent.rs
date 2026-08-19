@@ -11,6 +11,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 
 use crate::{
+    attribution::WorktreeSnapshot,
     output::AgentOutputLog,
     policy::{self, Decision},
     provider::AgentProvider,
@@ -51,6 +52,7 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
         "run-{}",
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
+    let attribution_before = capture_worktree(root)?;
 
     session::record_agent_lifecycle(
         root,
@@ -95,6 +97,8 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
         }
     };
 
+    record_attributed_files(root, provider.name(), &run_id, attribution_before);
+
     let duration_ms = elapsed_ms(started);
     let exit_code = status.code().unwrap_or(-1);
     let kind = if status.success() {
@@ -126,6 +130,65 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
             "{} exited with code {exit_code} [{run_id}] after {duration_ms}ms: {display}",
             provider.name()
         )
+    }
+}
+
+fn capture_worktree(root: &Path) -> Result<Option<WorktreeSnapshot>> {
+    if !session::is_active(root)? {
+        return Ok(None);
+    }
+
+    match WorktreeSnapshot::capture(root) {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error) => {
+            eprintln!("AgentWatch warning: file attribution snapshot unavailable: {error}");
+            Ok(None)
+        }
+    }
+}
+
+fn record_attributed_files(
+    root: &Path,
+    provider: &str,
+    run_id: &str,
+    before: Option<WorktreeSnapshot>,
+) {
+    let Some(before) = before else {
+        return;
+    };
+    let after = match WorktreeSnapshot::capture(root) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            eprintln!("AgentWatch warning: final file attribution snapshot failed: {error}");
+            return;
+        }
+    };
+    let changes = match before.changes(root, &after) {
+        Ok(changes) => changes,
+        Err(error) => {
+            eprintln!("AgentWatch warning: failed to compare run file changes: {error}");
+            return;
+        }
+    };
+
+    let mut failures = 0_usize;
+    for change in changes {
+        if let Err(error) = session::record_agent_file(
+            root,
+            run_id,
+            provider,
+            change.kind.as_str(),
+            &change.path,
+        ) {
+            failures += 1;
+            eprintln!(
+                "AgentWatch warning: failed to record attributed file {}: {error}",
+                change.path.display()
+            );
+        }
+    }
+    if failures > 0 {
+        eprintln!("AgentWatch warning: {failures} attributed file events were not persisted");
     }
 }
 
