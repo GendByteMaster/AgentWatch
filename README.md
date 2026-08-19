@@ -12,6 +12,7 @@ AgentWatch is a small Rust CLI for observing repository changes while coding wit
 - Apply configurable path and command policies with `allow`, `warn`, and `deny` decisions
 - Run coding agents through provider adapters
 - Run OpenAI Codex through `codex exec`
+- Track agent lifecycle, run IDs, durations, providers, and model metadata when available
 
 ## Commands
 
@@ -63,11 +64,11 @@ agentwatch stop
 
 `run` executes a child process with inherited stdin/stdout/stderr and records its exit code. A `deny` policy prevents the command from starting. A `warn` policy prints a warning but allows execution.
 
-`codex` uses the Codex provider adapter and executes `codex exec ...`. AgentWatch records the invocation as an `agent` event with `provider = "codex"`. Codex must already be installed and available in `PATH`.
+`codex` uses the Codex provider adapter and executes `codex exec ...`. Codex must already be installed and available in `PATH`.
 
 ## Agent providers
 
-Agent integrations are intentionally separated from the core through the `AgentProvider` trait. A provider defines its name, executable, and argument transformation. The current Codex provider converts:
+Agent integrations are intentionally separated from the core through the `AgentProvider` trait. A provider defines its name, executable, argument transformation, and optional model extraction. The current Codex provider converts:
 
 ```text
 agentwatch codex -- <args>
@@ -78,6 +79,8 @@ into:
 ```text
 codex exec <args>
 ```
+
+If Codex is invoked with `-m <model>` or `--model <model>`, AgentWatch stores that model in lifecycle events.
 
 This keeps the event, policy, and session layers independent from Codex and leaves room for Claude Code or other providers later.
 
@@ -91,11 +94,26 @@ This keeps the event, policy, and session layers independent from Codex and leav
 
 The event log is append-only, so recording a new filesystem, command, test, or agent event does not rewrite the entire session history.
 
-An agent event can contain fields such as:
+### Agent lifecycle
+
+Each observed agent run receives a `run_id` and emits lifecycle events:
+
+```text
+agent.started
+    -> agent.completed
+    -> agent.failed
+```
+
+A successful run can look like:
 
 ```json
-{"kind":"agent","provider":"codex","command":"codex exec ...","exit_code":0}
+{"kind":"agent.started","provider":"codex","run_id":"run-...","command":"codex exec ..."}
+{"kind":"agent.completed","provider":"codex","run_id":"run-...","command":"codex exec ...","exit_code":0,"duration_ms":18423}
 ```
+
+A failed process emits `agent.failed`. If AgentWatch sees a `agent.started` event without a matching terminal event, the session summary reports it as an unfinished agent run.
+
+The lifecycle fields are additive, so older JSONL events that used `kind = "agent"` remain readable.
 
 ## Policy
 
@@ -136,5 +154,5 @@ AgentWatch is an agent-agnostic observability and policy layer. Agent-specific b
 5. Event IDs ✅
 6. Configurable risk policies ✅
 7. Codex provider integration ✅
-8. Provider lifecycle events and richer agent metadata
+8. Provider lifecycle events and richer agent metadata ✅
 9. Optional TUI
