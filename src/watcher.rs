@@ -3,7 +3,10 @@ use std::{path::Path, sync::mpsc};
 use anyhow::{Context, Result};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::{policy::{self, Decision}, session};
+use crate::{
+    policy::{self, Decision},
+    session,
+};
 
 pub fn watch(path: &Path) -> Result<()> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
@@ -32,7 +35,11 @@ pub fn watch(path: &Path) -> Result<()> {
                         }
                     };
 
-                    if evaluation.matched_rule.as_deref().is_some_and(|rule| rule.starts_with("ignore:")) {
+                    if evaluation
+                        .matched_rule
+                        .as_deref()
+                        .is_some_and(|rule| rule.starts_with("ignore:"))
+                    {
                         continue;
                     }
 
