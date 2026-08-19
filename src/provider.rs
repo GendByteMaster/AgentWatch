@@ -189,12 +189,16 @@ fn parse_command_item(item: &Value, event_type: &str, parsed: &mut ParsedProvide
     match phase {
         ToolPhase::Started => parsed.display.push(format!("→ shell: {command}")),
         ToolPhase::Completed | ToolPhase::Failed => {
-            if let Some(output) = item.get("aggregated_output").and_then(Value::as_str) {
-                if !output.trim().is_empty() {
-                    parsed.display.push(output.trim_end().to_owned());
-                }
+            if let Some(output) = item.get("aggregated_output").and_then(Value::as_str)
+                && !output.trim().is_empty()
+            {
+                parsed.display.push(output.trim_end().to_owned());
             }
-            let label = if phase == ToolPhase::Completed { "✓" } else { "✗" };
+            let label = if phase == ToolPhase::Completed {
+                "✓"
+            } else {
+                "✗"
+            };
             parsed.display.push(format!("{label} shell: {command}"));
         }
     }
@@ -230,8 +234,14 @@ fn parse_file_item(item: &Value, event_type: &str, parsed: &mut ParsedProviderLi
             detail: None,
             exit_code: None,
         });
-        let label = if phase == ToolPhase::Completed { "✓" } else { "✗" };
-        parsed.display.push(format!("{label} file {action}: {path}"));
+        let label = if phase == ToolPhase::Completed {
+            "✓"
+        } else {
+            "✗"
+        };
+        parsed
+            .display
+            .push(format!("{label} file {action}: {path}"));
     }
 }
 
@@ -239,10 +249,7 @@ fn parse_mcp_item(item: &Value, event_type: &str, parsed: &mut ParsedProviderLin
     let Some(id) = item.get("id").and_then(Value::as_str) else {
         return;
     };
-    let server = item
-        .get("server")
-        .and_then(Value::as_str)
-        .unwrap_or("mcp");
+    let server = item.get("server").and_then(Value::as_str).unwrap_or("mcp");
     let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
     let name = format!("{server}/{tool}");
     let phase = phase_from_item(item, event_type);
@@ -298,7 +305,11 @@ fn parse_web_item(item: &Value, event_type: &str, parsed: &mut ParsedProviderLin
         detail: Some(query.clone()),
         exit_code: None,
     });
-    let marker = if phase == ToolPhase::Started { "→" } else { "✓" };
+    let marker = if phase == ToolPhase::Started {
+        "→"
+    } else {
+        "✓"
+    };
     parsed.display.push(format!("{marker} web: {query}"));
 }
 

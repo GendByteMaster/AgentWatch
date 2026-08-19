@@ -258,8 +258,8 @@ fn execute_agent<P: AgentProvider>(
     let mut terminal_warning_printed = false;
 
     for chunk in receiver {
-        let chunks = structured_output_chunks(root, provider, run_id, &chunk)
-            .unwrap_or_else(|| vec![chunk]);
+        let chunks =
+            structured_output_chunks(root, provider, run_id, &chunk).unwrap_or_else(|| vec![chunk]);
 
         for chunk in chunks {
             if let Err(error) = write_terminal(chunk.stream, &chunk.bytes)
@@ -269,8 +269,7 @@ fn execute_agent<P: AgentProvider>(
                 terminal_warning_printed = true;
             }
 
-            if let Err(error) =
-                output_log.append(run_id, provider_name, chunk.stream, &chunk.bytes)
+            if let Err(error) = output_log.append(run_id, provider_name, chunk.stream, &chunk.bytes)
                 && !log_warning_printed
             {
                 eprintln!("AgentWatch warning: failed to persist agent output: {error}");
