@@ -60,7 +60,10 @@ mod windows {
 
         candidates.extend(running_codex_paths());
 
-        if let Some(path) = candidates.into_iter().find(|path| is_codex_executable(path)) {
+        if let Some(path) = candidates
+            .into_iter()
+            .find(|path| is_codex_executable(path))
+        {
             activate(&path)?;
             return Ok(Some(path));
         }
