@@ -1,3 +1,13 @@
+use std::{
+    io::{BufRead, BufReader, Write},
+    path::Path,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +79,12 @@ pub trait AgentProvider {
 
     fn build_observed_args_with_approval(
         &self,
+        _root: &Path,
         user_args: &[String],
         _hook_command: &str,
         _timeout_seconds: u64,
-    ) -> Vec<String> {
-        self.build_observed_args(user_args)
+    ) -> Result<Vec<String>> {
+        Ok(self.build_observed_args(user_args))
     }
 
     fn parse_observed_stdout_line(&self, _line: &str) -> Option<ParsedProviderLine> {
@@ -120,20 +131,26 @@ impl AgentProvider for CodexProvider {
 
     fn build_observed_args_with_approval(
         &self,
+        root: &Path,
         user_args: &[String],
         hook_command: &str,
         timeout_seconds: u64,
-    ) -> Vec<String> {
-        let mut args = Vec::with_capacity(user_args.len() + 6);
-        args.push("-c".to_owned());
-        args.push(codex_pre_tool_hook_override(hook_command, timeout_seconds));
-        args.push("--dangerously-bypass-hook-trust".to_owned());
-        args.push("exec".to_owned());
-        if !user_args.iter().any(|arg| arg == "--json") {
-            args.push("--json".to_owned());
-        }
-        args.extend(user_args.iter().cloned());
-        args
+    ) -> Result<Vec<String>> {
+        let hook_override = codex_pre_tool_hook_override(hook_command, timeout_seconds);
+        let identity = discover_codex_hook_identity(root, &hook_override, hook_command)?;
+        let trust_override = codex_hook_trust_override(&identity.key, &identity.current_hash);
+        verify_codex_hook_trust(
+            root,
+            &hook_override,
+            &trust_override,
+            hook_command,
+            &identity,
+        )?;
+        Ok(codex_approval_args(
+            user_args,
+            hook_override,
+            trust_override,
+        ))
     }
 
     fn parse_observed_stdout_line(&self, line: &str) -> Option<ParsedProviderLine> {
@@ -148,12 +165,250 @@ impl AgentProvider for CodexProvider {
     }
 }
 
+const CODEX_HOOK_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(15);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CodexHookIdentity {
+    key: String,
+    current_hash: String,
+}
+
 fn codex_pre_tool_hook_override(hook_command: &str, timeout_seconds: u64) -> String {
     let command = serde_json::to_string(hook_command).expect("serializing a string cannot fail");
     let timeout_seconds = timeout_seconds.clamp(10, 3600);
     format!(
         "hooks.PreToolUse=[{{matcher=\"*\",hooks=[{{type=\"command\",command={command},timeout={timeout_seconds}}}]}}]"
     )
+}
+
+fn codex_hook_trust_override(key: &str, current_hash: &str) -> String {
+    let key = serde_json::to_string(key).expect("serializing a string cannot fail");
+    let current_hash =
+        serde_json::to_string(current_hash).expect("serializing a string cannot fail");
+    format!("hooks.state.{key}={{enabled=true,trusted_hash={current_hash}}}")
+}
+
+fn codex_approval_args(
+    user_args: &[String],
+    hook_override: String,
+    trust_override: String,
+) -> Vec<String> {
+    let mut args = Vec::with_capacity(user_args.len() + 7);
+    args.push("-c".to_owned());
+    args.push(hook_override);
+    args.push("-c".to_owned());
+    args.push(trust_override);
+    args.push("exec".to_owned());
+    if !user_args.iter().any(|arg| arg == "--json") {
+        args.push("--json".to_owned());
+    }
+    args.extend(user_args.iter().cloned());
+    args
+}
+
+fn discover_codex_hook_identity(
+    root: &Path,
+    hook_override: &str,
+    hook_command: &str,
+) -> Result<CodexHookIdentity> {
+    let result = codex_hooks_list(root, &[hook_override])?;
+    let hook = find_agentwatch_hook(&result, hook_command).context(
+        "Codex did not expose the AgentWatch session hook through hooks/list; refusing to start the agent",
+    )?;
+    let key = hook
+        .get("key")
+        .and_then(Value::as_str)
+        .context("Codex hooks/list omitted the AgentWatch hook key")?;
+    let current_hash = hook
+        .get("currentHash")
+        .and_then(Value::as_str)
+        .context("Codex hooks/list omitted the AgentWatch hook currentHash")?;
+    Ok(CodexHookIdentity {
+        key: key.to_owned(),
+        current_hash: current_hash.to_owned(),
+    })
+}
+
+fn verify_codex_hook_trust(
+    root: &Path,
+    hook_override: &str,
+    trust_override: &str,
+    hook_command: &str,
+    expected: &CodexHookIdentity,
+) -> Result<()> {
+    let result = codex_hooks_list(root, &[hook_override, trust_override])?;
+    let hook = find_agentwatch_hook(&result, hook_command).context(
+        "AgentWatch approval hook disappeared during Codex trust verification; refusing to start the agent",
+    )?;
+    let key = hook.get("key").and_then(Value::as_str).unwrap_or_default();
+    let current_hash = hook
+        .get("currentHash")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let enabled = hook
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let trust_status = hook
+        .get("trustStatus")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+
+    if key != expected.key
+        || current_hash != expected.current_hash
+        || !enabled
+        || trust_status != "trusted"
+    {
+        bail!(
+            "Codex did not verify the AgentWatch approval hook as the exact trusted hook (status={trust_status}); refusing to start the agent"
+        );
+    }
+    Ok(())
+}
+
+fn find_agentwatch_hook<'a>(result: &'a Value, hook_command: &str) -> Option<&'a Value> {
+    let entries = result.get("data")?.as_array()?;
+    for entry in entries {
+        let Some(hooks) = entry.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
+        for hook in hooks {
+            if hook.get("source").and_then(Value::as_str) == Some("sessionFlags")
+                && hook.get("eventName").and_then(Value::as_str) == Some("preToolUse")
+                && hook.get("handlerType").and_then(Value::as_str) == Some("command")
+                && hook.get("command").and_then(Value::as_str) == Some(hook_command)
+                && hook.get("matcher").and_then(Value::as_str) == Some("*")
+            {
+                return Some(hook);
+            }
+        }
+    }
+    None
+}
+
+fn codex_hooks_list(root: &Path, overrides: &[&str]) -> Result<Value> {
+    let mut command = Command::new("codex");
+    for value in overrides {
+        command.arg("-c").arg(value);
+    }
+    command
+        .arg("app-server")
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+
+    let mut child = command
+        .spawn()
+        .context("failed to start `codex app-server` for hook trust preflight")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("failed to open Codex app-server stdin")?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to open Codex app-server stdout")?;
+    let (sender, receiver) = mpsc::channel::<std::io::Result<String>>();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let outcome = (|| -> Result<Value> {
+        write_app_server_message(
+            &mut stdin,
+            &serde_json::json!({
+                "method": "initialize",
+                "id": 1,
+                "params": {
+                    "clientInfo": {
+                        "name": "agentwatch",
+                        "title": "AgentWatch",
+                        "version": env!("CARGO_PKG_VERSION"),
+                    }
+                }
+            }),
+        )?;
+        wait_app_server_response(&receiver, 1, CODEX_HOOK_PREFLIGHT_TIMEOUT)?;
+        write_app_server_message(
+            &mut stdin,
+            &serde_json::json!({"method": "initialized", "params": {}}),
+        )?;
+
+        let cwd = root
+            .canonicalize()
+            .unwrap_or_else(|_| root.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+        write_app_server_message(
+            &mut stdin,
+            &serde_json::json!({
+                "method": "hooks/list",
+                "id": 2,
+                "params": {"cwds": [cwd]}
+            }),
+        )?;
+        wait_app_server_response(&receiver, 2, CODEX_HOOK_PREFLIGHT_TIMEOUT)
+    })();
+
+    drop(stdin);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = reader.join();
+    outcome
+}
+
+fn write_app_server_message(writer: &mut impl Write, message: &Value) -> Result<()> {
+    serde_json::to_writer(&mut *writer, message)
+        .context("failed to encode Codex app-server request")?;
+    writer
+        .write_all(b"\n")
+        .context("failed to write Codex app-server request")?;
+    writer
+        .flush()
+        .context("failed to flush Codex app-server request")
+}
+
+fn wait_app_server_response(
+    receiver: &mpsc::Receiver<std::io::Result<String>>,
+    expected_id: i64,
+    timeout: Duration,
+) -> Result<Value> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("Codex app-server hook trust preflight timed out");
+        }
+        let line = match receiver.recv_timeout(remaining) {
+            Ok(Ok(line)) => line,
+            Ok(Err(error)) => {
+                return Err(error).context("failed to read Codex app-server response");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                bail!("Codex app-server hook trust preflight timed out");
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bail!("Codex app-server exited during hook trust preflight");
+            }
+        };
+        let value: Value = serde_json::from_str(&line)
+            .context("Codex app-server returned non-JSON output during hook trust preflight")?;
+        if value.get("id").and_then(Value::as_i64) != Some(expected_id) {
+            continue;
+        }
+        if let Some(error) = value.get("error") {
+            bail!("Codex app-server hook trust preflight failed: {error}");
+        }
+        return value
+            .get("result")
+            .cloned()
+            .context("Codex app-server response did not contain a result");
+    }
 }
 
 fn parse_codex_jsonl(line: &str) -> Option<ParsedProviderLine> {
@@ -368,7 +623,10 @@ fn phase_from_item(item: &Value, event_type: &str) -> ToolPhase {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentProvider, CodexProvider, ToolKind, ToolPhase};
+    use super::{
+        AgentProvider, CodexProvider, ToolKind, ToolPhase, codex_approval_args,
+        codex_hook_trust_override,
+    };
 
     #[test]
     fn observed_codex_args_enable_json_once() {
@@ -384,18 +642,33 @@ mod tests {
     }
 
     #[test]
-    fn gated_codex_args_inject_pre_tool_hook() {
-        let provider = CodexProvider;
-        let args = provider.build_observed_args_with_approval(
+    fn gated_codex_args_use_scoped_trust_without_bypass() {
+        let args = codex_approval_args(
             &["hello".into()],
-            "/tmp/agentwatch approval-hook",
-            600,
+            "hooks.PreToolUse=[test]".into(),
+            "hooks.state.\"hook-key\"={enabled=true,trusted_hash=\"sha256:abc\"}".into(),
         );
         assert_eq!(args[0], "-c");
         assert!(args[1].contains("hooks.PreToolUse"));
-        assert!(args[1].contains("approval-hook"));
-        assert_eq!(args[2], "--dangerously-bypass-hook-trust");
-        assert_eq!(&args[3..], ["exec", "--json", "hello"]);
+        assert_eq!(args[2], "-c");
+        assert!(args[3].contains("trusted_hash"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--dangerously-bypass-hook-trust")
+        );
+        assert_eq!(&args[4..], ["exec", "--json", "hello"]);
+    }
+
+    #[test]
+    fn scoped_trust_override_quotes_exact_hook_key_and_hash() {
+        let value = codex_hook_trust_override(
+            "/<session-flags>/config.toml:pre_tool_use:0:0",
+            "sha256:abc",
+        );
+        assert!(value.starts_with("hooks.state."));
+        assert!(value.contains("pre_tool_use:0:0"));
+        assert!(value.contains("trusted_hash=\"sha256:abc\""));
     }
 
     #[test]

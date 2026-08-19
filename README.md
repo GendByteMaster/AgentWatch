@@ -147,7 +147,9 @@ Reason: command matched warning policy `git reset --hard`
 
 Every decision is appended to `events.jsonl` as `approval.requested`, `approval.allowed`, or `approval.denied` with the active `run_id`.
 
-The current Codex adapter injects the hook as a per-invocation config override and uses Codex's hook-trust bypass flag so the generated session hook can run without a persisted trust record. That flag applies to enabled untrusted hooks for the same Codex invocation, so repositories with additional Codex hooks should review them before using the gate. A future native app-server approval transport can remove this adapter-level limitation.
+The Codex adapter does **not** use `--dangerously-bypass-hook-trust`. Before `codex exec` starts, AgentWatch opens a short-lived `codex app-server`, calls `hooks/list`, and discovers the exact session hook `key` and `currentHash` reported by the installed Codex version. AgentWatch then adds an ephemeral `hooks.state` trust entry for only that identity and runs a second `hooks/list` verification. The agent is started only when the same hook is still present, enabled, has the same hash, and reports `trustStatus = trusted`. Other user, project, and plugin hooks keep their normal Codex trust state. No persistent Codex trust configuration is modified.
+
+The trust preflight is fail-closed: an unsupported Codex version, changed hook identity, timeout, malformed app-server response, or failed trust verification aborts the run before `codex exec` starts. While Approval Gate is enabled, AgentWatch also rejects Codex hook-trust bypass flags and user-supplied `hooks.*` config overrides that could undermine the verified hook set.
 
 When the AgentWatch TUI is open, it advertises a short-lived local heartbeat. Approval requests are then routed into a `Pending Approval` modal where `a`, `s`, and `d` mean Allow once, Allow for session, and Deny. If the TUI is not running or its heartbeat becomes stale, the hook falls back to the invoking terminal. If neither interactive path is available, the gate fails closed.
 
@@ -229,6 +231,7 @@ The core intentionally separates provider-specific execution from session storag
 - Rust toolchain
 - Git
 - Codex CLI available in `PATH` for the current provider integration
+- a Codex version with `app-server` and `hooks/list` support when Approval Gate is enabled (the gate fails closed otherwise)
 
 ### Install from source
 

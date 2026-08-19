@@ -33,22 +33,30 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
         && user_args.iter().any(|arg| {
             matches!(
                 arg.as_str(),
-                "--dangerously-bypass-approvals-and-sandbox" | "--yolo"
+                "--dangerously-bypass-approvals-and-sandbox"
+                    | "--yolo"
+                    | "--dangerously-bypass-hook-trust"
             )
         })
     {
         bail!(
-            "Codex approval bypass flags are incompatible with the AgentWatch Approval Gate; disable `[approvals].enabled` or remove the bypass flag"
+            "Codex approval or hook-trust bypass flags are incompatible with the AgentWatch Approval Gate; disable `[approvals].enabled` or remove the bypass flag"
+        );
+    }
+    if approval_gate && has_codex_hook_config_override(user_args) {
+        bail!(
+            "Codex `hooks.*` config overrides are incompatible with the AgentWatch Approval Gate because they can change the verified hook set"
         );
     }
 
     let args = if approval_gate {
         let hook_command = approval::hook_command()?;
         provider.build_observed_args_with_approval(
+            root,
             user_args,
             &hook_command,
             approval_policy.timeout_seconds,
-        )
+        )?
     } else if observed {
         provider.build_observed_args(user_args)
     } else {
@@ -167,6 +175,16 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
             })
         }
     }
+}
+
+fn has_codex_hook_config_override(args: &[String]) -> bool {
+    args.windows(2).any(|pair| {
+        matches!(pair[0].as_str(), "-c" | "--config") && pair[1].trim_start().starts_with("hooks.")
+    }) || args.iter().any(|arg| {
+        arg.strip_prefix("-c=")
+            .or_else(|| arg.strip_prefix("--config="))
+            .is_some_and(|value| value.trim_start().starts_with("hooks."))
+    })
 }
 
 fn capture_worktree(root: &Path) -> Result<Option<WorktreeSnapshot>> {
