@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::risk;
+use crate::policy::{self, Decision};
 
 const STATE_DIR: &str = ".agentwatch";
 const META_FILE: &str = "session.json";
@@ -82,18 +82,34 @@ pub fn record_file(root: &Path, kind: impl Into<String>, path: &Path) -> Result<
         return Ok(());
     }
 
+    let evaluation = policy::evaluate_path(root, path)?;
+    let risk = match evaluation.decision {
+        Decision::Warn | Decision::Deny => Some(format!(
+            "{}:{}",
+            evaluation.decision.label(),
+            evaluation.matched_rule.as_deref().unwrap_or("policy")
+        )),
+        Decision::Allow => None,
+    };
+
     append_event(root, SessionEvent {
         id: event_id(),
         timestamp: Utc::now(),
         kind: kind.into(),
         path: Some(path.to_path_buf()),
-        risk: risk::reason(path).map(str::to_owned),
+        risk,
         command: None,
         exit_code: None,
     })
 }
 
-pub fn record_command(root: &Path, command: String, exit_code: i32, is_test: bool) -> Result<()> {
+pub fn record_command(
+    root: &Path,
+    command: String,
+    exit_code: i32,
+    is_test: bool,
+    risk: Option<String>,
+) -> Result<()> {
     if !is_active(root)? {
         return Ok(());
     }
@@ -103,7 +119,7 @@ pub fn record_command(root: &Path, command: String, exit_code: i32, is_test: boo
         timestamp: Utc::now(),
         kind: if is_test { "test".into() } else { "command".into() },
         path: None,
-        risk: None,
+        risk,
         command: Some(command),
         exit_code: Some(exit_code),
     })
@@ -157,7 +173,7 @@ fn print_summary(root: &Path, meta: &SessionMeta) -> Result<()> {
     println!("git diff: +{} -{}", added, removed);
     println!("commands: {}", commands);
     println!("tests: {} ({} failed)", tests.len(), failed_tests);
-    println!("risk events: {}", risks);
+    println!("policy events: {}", risks);
 
     if !files.is_empty() {
         println!("\nFiles");
