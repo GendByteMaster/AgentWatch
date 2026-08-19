@@ -12,7 +12,7 @@ pub fn run(root: &Path, command: &[String]) -> Result<()> {
     let display = command.join(" ");
     let evaluation = policy::evaluate_command(root, command)?;
 
-    match evaluation.decision {
+    let policy_risk = match evaluation.decision {
         Decision::Deny => {
             let rule = evaluation.matched_rule.unwrap_or_else(|| "policy".into());
             bail!("command denied by AgentWatch policy `{rule}`: {display}");
@@ -20,9 +20,10 @@ pub fn run(root: &Path, command: &[String]) -> Result<()> {
         Decision::Warn => {
             let rule = evaluation.matched_rule.unwrap_or_else(|| "policy".into());
             eprintln!("AgentWatch warning [{rule}]: {display}");
+            Some(format!("warn:{rule}"))
         }
-        Decision::Allow => {}
-    }
+        Decision::Allow => None,
+    };
 
     let is_test = looks_like_test(command);
     println!("AgentWatch running: {display}");
@@ -37,7 +38,7 @@ pub fn run(root: &Path, command: &[String]) -> Result<()> {
         .with_context(|| format!("failed to execute `{display}`"))?;
 
     let exit_code = status.code().unwrap_or(-1);
-    session::record_command(root, display.clone(), exit_code, is_test)?;
+    session::record_command(root, display.clone(), exit_code, is_test, policy_risk)?;
 
     if status.success() {
         println!("AgentWatch: command succeeded");
