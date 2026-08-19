@@ -1,8 +1,14 @@
-use std::{path::Path, process::{Command, Stdio}};
+use std::{
+    path::Path,
+    process::{Command, Stdio},
+};
 
 use anyhow::{Context, Result, bail};
 
-use crate::{policy::{self, Decision}, session};
+use crate::{
+    policy::{self, Decision},
+    session,
+};
 
 pub fn run(root: &Path, command: &[String]) -> Result<()> {
     if command.is_empty() {
