@@ -90,6 +90,37 @@ Unified diff
 
 The viewer supports line/page scrolling and syntax-oriented coloring for additions, removals, hunks, and file headers.
 
+### Secret redaction
+
+AgentWatch applies built-in secret redaction **before sensitive text is persisted to disk**.
+
+Redaction currently covers persisted provider output, command/lifecycle fields in `events.jsonl`, and per-run unified diff text. The live provider output mirrored to the developer's terminal is intentionally left unchanged.
+
+Built-in detectors cover common credential shapes such as:
+
+```text
+OPENAI_API_KEY=...
+DATABASE_PASSWORD=...
+Authorization: Bearer ...
+postgres://user:password@host/db
+JWTs
+OpenAI / Anthropic-style sk-... tokens
+GitHub tokens
+a selected set of common cloud / SaaS token prefixes
+PEM private-key blocks
+```
+
+Persisted values are replaced with markers such as:
+
+```text
+[REDACTED]
+[REDACTED PRIVATE KEY BLOCK]
+```
+
+Private-key redaction is stream-aware, so a multi-line key remains suppressed even when provider stdout/stderr arrives one line at a time.
+
+Redaction is deliberately safety-by-default, but it is still pattern-based rather than a full DLP system. Existing artifacts created before this feature are not rewritten retroactively.
+
 ### Policy engine
 
 AgentWatch can evaluate both file paths and commands using configurable rules:
@@ -203,6 +234,7 @@ That is enough to get:
 - duration and exit-code metadata
 - run-scoped net file attribution
 - live TUI updates
+- secret redaction for newly persisted output, command metadata, and run diffs
 
 `agentwatch watch` is optional. It adds ambient realtime filesystem events for changes made by all writers in the repository.
 
@@ -495,6 +527,8 @@ Session state lives inside the observed repository:
     └── run-....json
 ```
 
+All newly persisted textual observability data that may contain credentials is passed through the built-in redactor before it reaches AgentWatch storage. Raw terminal mirroring is not modified.
+
 ### `session.json`
 
 Compact metadata for the persistent development session:
@@ -622,6 +656,8 @@ The repository CI enforces formatting, compilation, Clippy with warnings denied,
 
 **Read before control.** Observability and trustworthy attribution come before destructive TUI actions such as kill or retry.
 
+**Minimize secret persistence.** Observability data is useful, but credentials should be removed before durable storage whenever AgentWatch can recognize them.
+
 **Explicit limitations.** AgentWatch should distinguish deterministic metadata from best-effort inference rather than presenting heuristics as certainty.
 
 ---
@@ -633,6 +669,7 @@ The repository CI enforces formatting, compilation, Clippy with warnings denied,
 - Output capture is session-scoped and currently stored locally as JSONL.
 - Run file attribution represents net worktree changes rather than a complete syscall-level write history.
 - Concurrent writers can make exact process attribution ambiguous.
+- Secret redaction is heuristic and pattern-based; it is not a complete DLP or secret-scanning system.
 - AgentWatch does not currently provide distributed/multi-machine session aggregation.
 
 ---
@@ -655,13 +692,15 @@ Completed foundations:
 - [x] Interactive TUI navigation, filtering, and scrolling
 - [x] Selected-run details panel
 - [x] Run-scoped net file attribution
+- [x] Per-run unified diff artifacts and TUI viewer
+- [x] Safety-by-default secret redaction for persisted observability data
 
 Next directions:
 
 - [ ] optional safe process controls
 - [ ] kill/retry actions with explicit safety boundaries
 - [ ] richer per-run test and command correlation
-- [ ] output retention limits and redaction controls
+- [ ] configurable redaction rules and output retention limits
 - [ ] additional provider adapters
 - [ ] stronger concurrent file attribution
 - [ ] richer session export/reporting

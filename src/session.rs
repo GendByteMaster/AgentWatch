@@ -10,7 +10,10 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::policy::{self, Decision};
+use crate::{
+    policy::{self, Decision},
+    redaction,
+};
 
 const STATE_DIR: &str = ".agentwatch";
 const META_FILE: &str = "session.json";
@@ -224,7 +227,14 @@ pub fn record_agent_lifecycle(
     )
 }
 
-fn append_event(root: &Path, event: SessionEvent) -> Result<()> {
+fn append_event(root: &Path, mut event: SessionEvent) -> Result<()> {
+    if let Some(command) = event.command.as_mut() {
+        *command = redaction::redact(command);
+    }
+    if let Some(risk) = event.risk.as_mut() {
+        *risk = redaction::redact(risk);
+    }
+
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
