@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::{redaction, session::SessionMeta};
+use crate::{redaction::Redactor, session::SessionMeta};
 
 const OUTPUT_FILE: &str = "agent-output.jsonl";
 pub const DEFAULT_TAIL_BYTES: usize = 128 * 1024;
@@ -24,6 +24,7 @@ pub struct AgentOutputRecord {
 
 pub struct AgentOutputLog {
     file: File,
+    redactor: Redactor,
 }
 
 impl AgentOutputLog {
@@ -51,7 +52,10 @@ impl AgentOutputLog {
             .open(state_dir.join(OUTPUT_FILE))
             .context("failed to open AgentWatch agent output log")?;
 
-        Ok(Some(Self { file }))
+        Ok(Some(Self {
+            file,
+            redactor: Redactor::default(),
+        }))
     }
 
     pub fn append(
@@ -68,12 +72,17 @@ impl AgentOutputLog {
             return Ok(());
         }
 
+        let text = self.redactor.redact(&text);
+        if text.is_empty() {
+            return Ok(());
+        }
+
         let record = AgentOutputRecord {
             timestamp: Utc::now(),
             run_id: run_id.to_owned(),
             provider: provider.to_owned(),
             stream: stream.to_owned(),
-            text: redaction::redact(&text),
+            text,
         };
         let mut encoded =
             serde_json::to_vec(&record).context("failed to serialize AgentWatch agent output")?;
