@@ -18,7 +18,10 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
 
-use crate::session::{SessionEvent, SessionMeta};
+use crate::{
+    output::{self, AgentOutputRecord},
+    session::{SessionEvent, SessionMeta},
+};
 
 const REFRESH: Duration = Duration::from_millis(750);
 
@@ -51,6 +54,7 @@ struct GitInfo {
 struct Data {
     meta: SessionMeta,
     events: Vec<SessionEvent>,
+    output: Vec<AgentOutputRecord>,
     runs: Vec<AgentRun>,
     git: GitInfo,
 }
@@ -106,12 +110,14 @@ fn load(root: &Path) -> Result<Data> {
     .context("failed to parse session metadata")?;
 
     let events = read_events(root)?;
+    let output = output::read_tail(root, &meta.started_at, output::DEFAULT_TAIL_BYTES)?;
     let runs = aggregate_runs(&events);
     let git = git_info(root);
 
     Ok(Data {
         meta,
         events,
+        output,
         runs,
         git,
     })
@@ -601,28 +607,49 @@ fn tests(frame: &mut Frame, area: Rect, data: &Data) {
 }
 
 fn tail(frame: &mut Frame, area: Rect, data: &Data) {
-    let lines = data
-        .events
-        .iter()
-        .rev()
-        .filter(|event| event.kind.starts_with("agent"))
-        .take(area.height.saturating_sub(2) as usize)
-        .map(|event| {
-            Line::raw(format!(
-                "{} [{}] {} {}",
-                event.timestamp.format("%H:%M:%S"),
-                event.provider.as_deref().unwrap_or("agent"),
-                event.kind,
-                short(event.run_id.as_deref().unwrap_or("-"), 18)
-            ))
-        })
-        .collect::<Vec<_>>();
+    let limit = area.height.saturating_sub(2) as usize;
+    let lines = if data.output.is_empty() {
+        vec![Line::styled(
+            "No captured agent output yet",
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        data.output
+            .iter()
+            .rev()
+            .take(limit)
+            .map(|record| {
+                Line::from(vec![
+                    Span::styled(
+                        record.timestamp.format("%H:%M:%S ").to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(
+                            "[{}:{}] ",
+                            record.provider,
+                            short(&record.run_id, 12)
+                        ),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                    Span::styled(
+                        format!("{} ", record.stream),
+                        Style::default().fg(output_color(record)),
+                    ),
+                    Span::raw(record.text.clone()),
+                ])
+            })
+            .collect::<Vec<_>>()
+    };
+
     frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .title("Latest Output / Agent Tail")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Live Agent Output")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
         area,
     );
 }
@@ -641,6 +668,7 @@ fn session(frame: &mut Frame, area: Rect, data: &Data) {
     frame.render_widget(
         Paragraph::new(vec![
             Line::raw(format!("Events: {}", data.events.len())),
+            Line::raw(format!("Output: {}", data.output.len())),
             Line::raw(format!("Size:   {}", bytes(size))),
             Line::raw(format!(
                 "Start:  {}",
@@ -682,6 +710,14 @@ fn event_color(event: &SessionEvent) -> Color {
         Color::Yellow
     } else if event.kind.contains("completed") || event.kind == "test" {
         Color::Green
+    } else {
+        Color::Gray
+    }
+}
+
+fn output_color(record: &AgentOutputRecord) -> Color {
+    if record.stream == "stderr" {
+        Color::Yellow
     } else {
         Color::Gray
     }
