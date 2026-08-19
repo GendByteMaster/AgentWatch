@@ -1,5 +1,6 @@
 mod git;
 mod risk;
+mod runner;
 mod session;
 mod watcher;
 
@@ -47,6 +48,13 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+    /// Run a command and record its result in the active session.
+    Run {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -59,5 +67,6 @@ fn main() -> Result<()> {
         Command::Start { path } => session::start(&path),
         Command::Stop { path } => session::stop(&path),
         Command::Session { path } => session::show(&path),
+        Command::Run { path, command } => runner::run(&path, &command),
     }
 }
