@@ -1,4 +1,5 @@
 mod git;
+mod policy;
 mod risk;
 mod runner;
 mod session;
@@ -55,6 +56,19 @@ enum Command {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Evaluate a file path against the active policy.
+    CheckPath {
+        target: PathBuf,
+        #[arg(short, long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Evaluate a command against the active policy without running it.
+    CheckCommand {
+        #[arg(short, long, default_value = ".")]
+        path: PathBuf,
+        #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -68,5 +82,21 @@ fn main() -> Result<()> {
         Command::Stop { path } => session::stop(&path),
         Command::Session { path } => session::show(&path),
         Command::Run { path, command } => runner::run(&path, &command),
+        Command::CheckPath { target, root } => {
+            let evaluation = policy::evaluate_path(&root, &target)?;
+            println!("decision: {}", evaluation.decision.label());
+            if let Some(rule) = evaluation.matched_rule {
+                println!("rule: {rule}");
+            }
+            Ok(())
+        }
+        Command::CheckCommand { path, command } => {
+            let evaluation = policy::evaluate_command(&path, &command)?;
+            println!("decision: {}", evaluation.decision.label());
+            if let Some(rule) = evaluation.matched_rule {
+                println!("rule: {rule}");
+            }
+            Ok(())
+        }
     }
 }
