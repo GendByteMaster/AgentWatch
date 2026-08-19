@@ -1,10 +1,12 @@
 use std::{
     collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
-    fs::File,
+    env,
+    fs::{self, File},
     hash::{Hash, Hasher},
     io::Read,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -39,9 +41,23 @@ struct DirtyFile {
 }
 
 #[derive(Debug, Clone)]
+pub struct DiffStat {
+    pub path: PathBuf,
+    pub added: u64,
+    pub removed: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SnapshotDiff {
+    pub patch: String,
+    pub stats: Vec<DiffStat>,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorktreeSnapshot {
     head: Option<String>,
     dirty: BTreeMap<PathBuf, DirtyFile>,
+    tree: Option<String>,
 }
 
 impl WorktreeSnapshot {
@@ -49,6 +65,7 @@ impl WorktreeSnapshot {
         Ok(Self {
             head: git_head(root),
             dirty: dirty_files(root)?,
+            tree: snapshot_tree(root)?,
         })
     }
 
@@ -80,6 +97,27 @@ impl WorktreeSnapshot {
             .map(|(path, kind)| AttributedFile { path, kind })
             .collect())
     }
+
+    pub fn diff(&self, root: &Path, after: &Self) -> Result<SnapshotDiff> {
+        let (Some(before_tree), Some(after_tree)) = (self.tree.as_deref(), after.tree.as_deref())
+        else {
+            return Ok(SnapshotDiff {
+                patch: String::new(),
+                stats: Vec::new(),
+            });
+        };
+
+        if before_tree == after_tree {
+            return Ok(SnapshotDiff {
+                patch: String::new(),
+                stats: Vec::new(),
+            });
+        }
+
+        let patch = git_diff_patch(root, before_tree, after_tree)?;
+        let stats = git_diff_stats(root, before_tree, after_tree)?;
+        Ok(SnapshotDiff { patch, stats })
+    }
 }
 
 fn git_head(root: &Path) -> Option<String> {
@@ -92,6 +130,65 @@ fn git_head(root: &Path) -> Option<String> {
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn snapshot_tree(root: &Path) -> Result<Option<String>> {
+    let probe = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(root)
+        .output()
+        .context("failed to detect Git worktree for run diff")?;
+    if !probe.status.success() {
+        return Ok(None);
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let index_path = env::temp_dir().join(format!(
+        "agentwatch-index-{}-{nonce}",
+        std::process::id()
+    ));
+    let lock_path = PathBuf::from(format!("{}.lock", index_path.display()));
+
+    let result = (|| -> Result<Option<String>> {
+        let read_tree = Command::new("git")
+            .args(["read-tree", "--empty"])
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(root)
+            .status()
+            .context("failed to initialize temporary Git index")?;
+        if !read_tree.success() {
+            bail!("git read-tree failed while capturing run diff snapshot");
+        }
+
+        let add = Command::new("git")
+            .args(["add", "-A", "--", "."])
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(root)
+            .status()
+            .context("failed to populate temporary Git index")?;
+        if !add.success() {
+            bail!("git add failed while capturing run diff snapshot");
+        }
+
+        let tree = Command::new("git")
+            .args(["write-tree"])
+            .env("GIT_INDEX_FILE", &index_path)
+            .current_dir(root)
+            .output()
+            .context("failed to write temporary Git tree")?;
+        if !tree.status.success() {
+            bail!("git write-tree failed while capturing run diff snapshot");
+        }
+
+        Ok(Some(String::from_utf8_lossy(&tree.stdout).trim().to_owned()))
+    })();
+
+    let _ = fs::remove_file(&index_path);
+    let _ = fs::remove_file(lock_path);
+    result
 }
 
 fn dirty_files(root: &Path) -> Result<BTreeMap<PathBuf, DirtyFile>> {
@@ -162,6 +259,73 @@ fn fingerprint(path: &Path) -> Result<Option<u64>> {
         buffer[..read].hash(&mut hasher);
     }
     Ok(Some(hasher.finish()))
+}
+
+fn git_diff_patch(root: &Path, before: &str, after: &str) -> Result<String> {
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--binary",
+            "--no-ext-diff",
+            "--no-color",
+            "--no-renames",
+            before,
+            after,
+            "--",
+        ])
+        .current_dir(root)
+        .output()
+        .context("failed to generate run diff")?;
+    if !output.status.success() {
+        bail!("git diff failed while generating run diff");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn git_diff_stats(root: &Path, before: &str, after: &str) -> Result<Vec<DiffStat>> {
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--numstat",
+            "--no-renames",
+            "-z",
+            before,
+            after,
+            "--",
+        ])
+        .current_dir(root)
+        .output()
+        .context("failed to generate run diff stats")?;
+    if !output.status.success() {
+        bail!("git diff --numstat failed while generating run diff stats");
+    }
+
+    let mut stats = Vec::new();
+    for field in output.stdout.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            continue;
+        }
+        let mut parts = field.splitn(3, |byte| *byte == b'\t');
+        let added = parts
+            .next()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let removed = parts
+            .next()
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        let Some(path) = parts.next() else {
+            continue;
+        };
+        stats.push(DiffStat {
+            path: PathBuf::from(String::from_utf8_lossy(path).into_owned()),
+            added,
+            removed,
+        });
+    }
+    Ok(stats)
 }
 
 fn committed_changes(
