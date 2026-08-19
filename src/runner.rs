@@ -2,7 +2,7 @@ use std::{path::Path, process::{Command, Stdio}};
 
 use anyhow::{Context, Result, bail};
 
-use crate::session;
+use crate::{policy::{self, Decision}, session};
 
 pub fn run(root: &Path, command: &[String]) -> Result<()> {
     if command.is_empty() {
@@ -10,8 +10,21 @@ pub fn run(root: &Path, command: &[String]) -> Result<()> {
     }
 
     let display = command.join(" ");
-    let is_test = looks_like_test(command);
+    let evaluation = policy::evaluate_command(root, command)?;
 
+    match evaluation.decision {
+        Decision::Deny => {
+            let rule = evaluation.matched_rule.unwrap_or_else(|| "policy".into());
+            bail!("command denied by AgentWatch policy `{rule}`: {display}");
+        }
+        Decision::Warn => {
+            let rule = evaluation.matched_rule.unwrap_or_else(|| "policy".into());
+            eprintln!("AgentWatch warning [{rule}]: {display}");
+        }
+        Decision::Allow => {}
+    }
+
+    let is_test = looks_like_test(command);
     println!("AgentWatch running: {display}");
 
     let status = Command::new(&command[0])
