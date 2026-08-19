@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader},
     path::Path,
@@ -924,13 +924,20 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         return;
     };
 
-    let end = run.ended_at.unwrap_or_else(Utc::now);
-    let observed_files: BTreeSet<_> = data
+    let attributed_files = data
         .events
         .iter()
-        .filter(|event| event.timestamp >= run.started && event.timestamp <= end)
-        .filter_map(|event| event.path.as_ref())
-        .collect();
+        .filter(|event| event.run_id.as_deref() == Some(run.id.as_str()))
+        .filter(|event| event.kind.starts_with("agent.file."))
+        .filter_map(|event| {
+            event.path.as_ref().map(|path| {
+                (
+                    event.kind.strip_prefix("agent.file.").unwrap_or("modified"),
+                    path,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
     let (status, status_style) = match run.status {
         RunStatus::Running => ("running", Style::default().fg(Color::Green)),
         RunStatus::Completed => ("completed", Style::default().fg(Color::Green)),
@@ -976,24 +983,24 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         Line::raw(format!("Command: {}", run.command)),
         Line::raw(""),
         Line::styled(
-            "Observed files (time window)",
+            "Files attributed to run",
             Style::default().fg(Color::DarkGray),
         ),
     ];
 
     let file_limit = area.height.saturating_sub(15) as usize;
-    if observed_files.is_empty() {
+    if attributed_files.is_empty() {
         lines.push(Line::styled(
-            "  none recorded (watcher may be inactive)",
+            "  no net file changes recorded",
             Style::default().fg(Color::DarkGray),
         ));
     } else {
-        for path in observed_files.iter().take(file_limit) {
-            lines.push(Line::raw(format!("  {}", path.display())));
+        for (change, path) in attributed_files.iter().take(file_limit) {
+            lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
         }
-        if observed_files.len() > file_limit {
+        if attributed_files.len() > file_limit {
             lines.push(Line::styled(
-                format!("  +{} more", observed_files.len() - file_limit),
+                format!("  +{} more", attributed_files.len() - file_limit),
                 Style::default().fg(Color::DarkGray),
             ));
         }

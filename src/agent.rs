@@ -173,13 +173,9 @@ fn record_attributed_files(
 
     let mut failures = 0_usize;
     for change in changes {
-        if let Err(error) = session::record_agent_file(
-            root,
-            run_id,
-            provider,
-            change.kind.as_str(),
-            &change.path,
-        ) {
+        if let Err(error) =
+            session::record_agent_file(root, run_id, provider, change.kind.as_str(), &change.path)
+        {
             failures += 1;
             eprintln!(
                 "AgentWatch warning: failed to record attributed file {}: {error}",

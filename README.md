@@ -16,6 +16,29 @@ AgentWatch is a small Rust CLI for observing repository changes while coding wit
 - Capture agent stdout/stderr without hiding it from the terminal
 - Display a live read-only terminal dashboard with Ratatui
 
+## Quick start
+
+Prerequisites: Rust toolchain and the Codex CLI available in `PATH`.
+
+```bash
+git clone https://github.com/GendByteMaster/AgentWatch.git
+cd AgentWatch
+cargo install --path .
+agentwatch start
+```
+
+Then use two terminals in the same project:
+
+```bash
+# terminal 1
+agentwatch tui
+
+# terminal 2
+agentwatch codex -- "Fix the failing tests"
+```
+
+That is enough for lifecycle events, live stdout/stderr, policy checks, and run-scoped net file attribution. `agentwatch watch` is optional and adds ambient realtime filesystem events from all writers.
+
 ## Commands
 
 ```bash
@@ -91,7 +114,7 @@ When an AgentWatch session is active, provider stdout/stderr is piped through a 
 
 The interactive focus cycles through `Agents -> Events -> Output`. The selected agent run is highlighted, and the output panel filters to that run by default. You can switch the output panel back to all runs at any time.
 
-The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.
+The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing.
 
 Keys:
 
@@ -209,4 +232,5 @@ AgentWatch is an agent-agnostic observability and policy layer. Agent-specific b
 9. Read-only live TUI ✅
 10. Provider stdout/stderr capture ✅
 11. Interactive TUI navigation, run filtering, and scrolling ✅
-12. Optional safe control actions
+12. Run-scoped net file attribution ✅
+13. Optional safe control actions
