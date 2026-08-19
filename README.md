@@ -89,14 +89,22 @@ When an AgentWatch session is active, provider stdout/stderr is piped through a 
 - live provider stdout/stderr
 - session event/output counts and storage size
 
+The interactive focus cycles through `Agents -> Events -> Output`. The selected agent run is highlighted, and the output panel filters to that run by default. You can switch the output panel back to all runs at any time.
+
 Keys:
 
 ```text
-q / Esc   quit
-r         refresh now
+Tab / Shift+Tab   next / previous focused panel
+Up / Down         select agent or scroll focused panel
+j / k             Down / Up aliases
+PageUp / PageDown scroll by 5 items
+Home / End        newest / oldest boundary
+ a                all runs / selected run output
+ r                refresh now
+ q / Esc          quit
 ```
 
-The first TUI version is intentionally read-only. Process controls such as kill, retry, or approval are not exposed yet.
+The TUI remains intentionally read-only. Process controls such as kill, retry, or approval are not exposed yet.
 
 The `Live Agent Output` panel reads only the tail of the output stream instead of reparsing the entire file every refresh. Records from older AgentWatch sessions are filtered out by the current session start timestamp.
 
@@ -198,4 +206,5 @@ AgentWatch is an agent-agnostic observability and policy layer. Agent-specific b
 8. Provider lifecycle events and richer agent metadata ✅
 9. Read-only live TUI ✅
 10. Provider stdout/stderr capture ✅
-11. Optional safe control actions
+11. Interactive TUI navigation, run filtering, and scrolling ✅
+12. Optional safe control actions
