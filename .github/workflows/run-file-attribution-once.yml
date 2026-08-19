@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 jobs:
-  implement-and-validate:
+  validate:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -21,414 +21,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Implement run-scoped file attribution
+      - name: Update TUI and README
         run: |
-          cat > src/attribution.rs <<'RS'
-          use std::{
-              collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher},
-              fs::File,
-              hash::{Hash, Hasher},
-              io::Read,
-              path::{Path, PathBuf},
-              process::Command,
-          };
-
-          use anyhow::{Context, Result, bail};
-
-          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-          pub enum FileChangeKind {
-              Created,
-              Modified,
-              Deleted,
-          }
-
-          impl FileChangeKind {
-              pub fn as_str(self) -> &'static str {
-                  match self {
-                      Self::Created => "created",
-                      Self::Modified => "modified",
-                      Self::Deleted => "deleted",
-                  }
-              }
-          }
-
-          #[derive(Debug, Clone)]
-          pub struct AttributedFile {
-              pub path: PathBuf,
-              pub kind: FileChangeKind,
-          }
-
-          #[derive(Debug, Clone, PartialEq, Eq)]
-          struct DirtyFile {
-              status: String,
-              fingerprint: Option<u64>,
-          }
-
-          #[derive(Debug, Clone)]
-          pub struct WorktreeSnapshot {
-              head: Option<String>,
-              dirty: BTreeMap<PathBuf, DirtyFile>,
-          }
-
-          impl WorktreeSnapshot {
-              pub fn capture(root: &Path) -> Result<Self> {
-                  Ok(Self {
-                      head: git_head(root),
-                      dirty: dirty_files(root)?,
-                  })
-              }
-
-              pub fn changes(&self, root: &Path, after: &Self) -> Result<Vec<AttributedFile>> {
-                  let head_changed = self.head != after.head;
-                  let mut changes = committed_changes(root, self.head.as_deref(), after.head.as_deref())?;
-                  let paths: BTreeSet<_> = self
-                      .dirty
-                      .keys()
-                      .chain(after.dirty.keys())
-                      .cloned()
-                      .collect();
-
-                  for path in paths {
-                      let before_file = self.dirty.get(&path);
-                      let after_file = after.dirty.get(&path);
-                      if before_file == after_file {
-                          continue;
-                      }
-
-                      changes.insert(
-                          path,
-                          infer_worktree_change(before_file, after_file, head_changed),
-                      );
-                  }
-
-                  Ok(changes
-                      .into_iter()
-                      .map(|(path, kind)| AttributedFile { path, kind })
-                      .collect())
-              }
-          }
-
-          fn git_head(root: &Path) -> Option<String> {
-              let output = Command::new("git")
-                  .args(["rev-parse", "HEAD"])
-                  .current_dir(root)
-                  .output()
-                  .ok()?;
-              output
-                  .status
-                  .success()
-                  .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-          }
-
-          fn dirty_files(root: &Path) -> Result<BTreeMap<PathBuf, DirtyFile>> {
-              let output = Command::new("git")
-                  .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-                  .current_dir(root)
-                  .output()
-                  .context("failed to execute git status for run attribution")?;
-              if !output.status.success() {
-                  bail!("git status failed while capturing run attribution snapshot");
-              }
-
-              let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
-              let mut dirty = BTreeMap::new();
-              let mut index = 0;
-              while index < fields.len() {
-                  let entry = fields[index];
-                  index += 1;
-                  if entry.len() < 4 {
-                      continue;
-                  }
-
-                  let status = String::from_utf8_lossy(&entry[..2]).into_owned();
-                  let path = PathBuf::from(String::from_utf8_lossy(&entry[3..]).into_owned());
-                  if path.starts_with(".agentwatch") {
-                      continue;
-                  }
-
-                  let fingerprint = fingerprint(&root.join(&path))?;
-                  dirty.insert(
-                      path,
-                      DirtyFile {
-                          status: status.clone(),
-                          fingerprint,
-                      },
-                  );
-
-                  if (status.contains('R') || status.contains('C')) && index < fields.len() {
-                      index += 1;
-                  }
-              }
-
-              Ok(dirty)
-          }
-
-          fn fingerprint(path: &Path) -> Result<Option<u64>> {
-              let mut file = match File::open(path) {
-                  Ok(file) => file,
-                  Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                  Err(error) => {
-                      return Err(error)
-                          .with_context(|| format!("failed to open {}", path.display()));
-                  }
-              };
-
-              let mut hasher = DefaultHasher::new();
-              file.metadata()
-                  .with_context(|| format!("failed to inspect {}", path.display()))?
-                  .len()
-                  .hash(&mut hasher);
-              let mut buffer = [0_u8; 64 * 1024];
-              loop {
-                  let read = file
-                      .read(&mut buffer)
-                      .with_context(|| format!("failed to hash {}", path.display()))?;
-                  if read == 0 {
-                      break;
-                  }
-                  buffer[..read].hash(&mut hasher);
-              }
-              Ok(Some(hasher.finish()))
-          }
-
-          fn committed_changes(
-              root: &Path,
-              before: Option<&str>,
-              after: Option<&str>,
-          ) -> Result<BTreeMap<PathBuf, FileChangeKind>> {
-              let (Some(before), Some(after)) = (before, after) else {
-                  return Ok(BTreeMap::new());
-              };
-              if before == after {
-                  return Ok(BTreeMap::new());
-              }
-
-              let output = Command::new("git")
-                  .args(["diff", "--name-status", "-z", before, after])
-                  .current_dir(root)
-                  .output()
-                  .context("failed to inspect commits made during agent run")?;
-              if !output.status.success() {
-                  return Ok(BTreeMap::new());
-              }
-
-              let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
-              let mut changes = BTreeMap::new();
-              let mut index = 0;
-              while index < fields.len() {
-                  let status = String::from_utf8_lossy(fields[index]).into_owned();
-                  index += 1;
-                  if status.is_empty() || index >= fields.len() {
-                      continue;
-                  }
-
-                  let code = status.chars().next().unwrap_or('M');
-                  if code == 'R' || code == 'C' {
-                      if index + 1 >= fields.len() {
-                          break;
-                      }
-                      let old = PathBuf::from(String::from_utf8_lossy(fields[index]).into_owned());
-                      let new = PathBuf::from(String::from_utf8_lossy(fields[index + 1]).into_owned());
-                      index += 2;
-                      changes.insert(old, FileChangeKind::Deleted);
-                      changes.insert(new, FileChangeKind::Created);
-                      continue;
-                  }
-
-                  let path = PathBuf::from(String::from_utf8_lossy(fields[index]).into_owned());
-                  index += 1;
-                  let kind = match code {
-                      'A' => FileChangeKind::Created,
-                      'D' => FileChangeKind::Deleted,
-                      _ => FileChangeKind::Modified,
-                  };
-                  changes.insert(path, kind);
-              }
-
-              Ok(changes)
-          }
-
-          fn infer_worktree_change(
-              before: Option<&DirtyFile>,
-              after: Option<&DirtyFile>,
-              head_changed: bool,
-          ) -> FileChangeKind {
-              match (before, after) {
-                  (None, Some(file)) if is_created(&file.status) => FileChangeKind::Created,
-                  (None, Some(file)) if is_deleted(&file.status) => FileChangeKind::Deleted,
-                  (None, Some(_)) => FileChangeKind::Modified,
-                  (Some(file), None) if is_created(&file.status) && !head_changed => {
-                      FileChangeKind::Deleted
-                  }
-                  (Some(file), None) if is_created(&file.status) => FileChangeKind::Created,
-                  (Some(_), None) => FileChangeKind::Modified,
-                  (Some(_), Some(file)) if is_deleted(&file.status) => FileChangeKind::Deleted,
-                  (Some(_), Some(_)) => FileChangeKind::Modified,
-                  (None, None) => FileChangeKind::Modified,
-              }
-          }
-
-          fn is_created(status: &str) -> bool {
-              status == "??" || status.contains('A')
-          }
-
-          fn is_deleted(status: &str) -> bool {
-              status.contains('D')
-          }
-          RS
-
           python - <<'PY'
           from pathlib import Path
-
-          main = Path("src/main.rs")
-          text = main.read_text()
-          if "mod attribution;" not in text:
-              text = text.replace("mod agent;\n", "mod agent;\nmod attribution;\n", 1)
-          main.write_text(text)
-
-          session = Path("src/session.rs")
-          text = session.read_text()
-          marker = "pub fn record_command(\n"
-          if "pub fn record_agent_file(" not in text:
-              block = '''pub fn record_agent_file(
-              root: &Path,
-              run_id: &str,
-              provider: &str,
-              change: &str,
-              path: &Path,
-          ) -> Result<()> {
-              if !is_active(root)? {
-                  return Ok(());
-              }
-
-              let evaluation = policy::evaluate_path(root, path)?;
-              let risk = match evaluation.decision {
-                  Decision::Warn | Decision::Deny => Some(format!(
-                      "{}:{}",
-                      evaluation.decision.label(),
-                      evaluation.matched_rule.as_deref().unwrap_or("policy")
-                  )),
-                  Decision::Allow => None,
-              };
-
-              append_event(
-                  root,
-                  SessionEvent {
-                      id: event_id(),
-                      timestamp: Utc::now(),
-                      kind: format!("agent.file.{change}"),
-                      path: Some(path.to_path_buf()),
-                      risk,
-                      command: None,
-                      exit_code: None,
-                      provider: Some(provider.to_owned()),
-                      model: None,
-                      run_id: Some(run_id.to_owned()),
-                      duration_ms: None,
-                  },
-              )
-          }
-
-          '''
-              text = text.replace(marker, block + marker, 1)
-          text = text.replace("fn is_active(root: &Path) -> Result<bool> {", "pub(crate) fn is_active(root: &Path) -> Result<bool> {", 1)
-          session.write_text(text)
-
-          agent = Path("src/agent.rs")
-          text = agent.read_text()
-          text = text.replace(
-              "use crate::{\n    output::AgentOutputLog,",
-              "use crate::{\n    attribution::WorktreeSnapshot,\n    output::AgentOutputLog,",
-              1,
-          )
-          snapshot_marker = '''    session::record_agent_lifecycle(
-              root,
-              "agent.started",'''
-          if "let attribution_before = capture_worktree(root)?;" not in text:
-              text = text.replace(
-                  snapshot_marker,
-                  '''    let attribution_before = capture_worktree(root)?;
-
-              session::record_agent_lifecycle(
-              root,
-              "agent.started",''',
-                  1,
-              )
-          terminal_marker = '''    let duration_ms = elapsed_ms(started);
-              let exit_code = status.code().unwrap_or(-1);'''
-          if "record_attributed_files(root, provider.name(), &run_id, attribution_before);" not in text:
-              text = text.replace(
-                  terminal_marker,
-                  '''    record_attributed_files(root, provider.name(), &run_id, attribution_before);
-
-              let duration_ms = elapsed_ms(started);
-              let exit_code = status.code().unwrap_or(-1);''',
-                  1,
-              )
-          helper_marker = "fn execute_agent(\n"
-          if "fn capture_worktree(" not in text:
-              helpers = '''fn capture_worktree(root: &Path) -> Result<Option<WorktreeSnapshot>> {
-              if !session::is_active(root)? {
-                  return Ok(None);
-              }
-
-              match WorktreeSnapshot::capture(root) {
-                  Ok(snapshot) => Ok(Some(snapshot)),
-                  Err(error) => {
-                      eprintln!("AgentWatch warning: file attribution snapshot unavailable: {error}");
-                      Ok(None)
-                  }
-              }
-          }
-
-          fn record_attributed_files(
-              root: &Path,
-              provider: &str,
-              run_id: &str,
-              before: Option<WorktreeSnapshot>,
-          ) {
-              let Some(before) = before else {
-                  return;
-              };
-              let after = match WorktreeSnapshot::capture(root) {
-                  Ok(snapshot) => snapshot,
-                  Err(error) => {
-                      eprintln!("AgentWatch warning: final file attribution snapshot failed: {error}");
-                      return;
-                  }
-              };
-              let changes = match before.changes(root, &after) {
-                  Ok(changes) => changes,
-                  Err(error) => {
-                      eprintln!("AgentWatch warning: failed to compare run file changes: {error}");
-                      return;
-                  }
-              };
-
-              let mut failures = 0_usize;
-              for change in changes {
-                  if let Err(error) = session::record_agent_file(
-                      root,
-                      run_id,
-                      provider,
-                      change.kind.as_str(),
-                      &change.path,
-                  ) {
-                      failures += 1;
-                      eprintln!(
-                          "AgentWatch warning: failed to record attributed file {}: {error}",
-                          change.path.display()
-                      );
-                  }
-              }
-              if failures > 0 {
-                  eprintln!("AgentWatch warning: {failures} attributed file events were not persisted");
-              }
-          }
-
-          '''
-              text = text.replace(helper_marker, helpers + helper_marker, 1)
-          agent.write_text(text)
 
           dashboard = Path("src/dashboard.rs")
           text = dashboard.read_text()
@@ -437,53 +33,71 @@ jobs:
               "    collections::BTreeMap,\n",
               1,
           )
-          start = text.index("fn run_details(")
-          files_start = text.index("    let end = run.ended_at", start)
-          status_start = text.index("    let (status, status_style)", files_start)
-          replacement = '''    let attributed_files = data
-                  .events
-                  .iter()
-                  .filter(|event| event.run_id.as_deref() == Some(run.id.as_str()))
-                  .filter(|event| event.kind.starts_with("agent.file."))
-                  .filter_map(|event| {
-                      event.path.as_ref().map(|path| {
-                          (
-                              event.kind.strip_prefix("agent.file.").unwrap_or("modified"),
-                              path,
-                          )
-                      })
-                  })
-                  .collect::<Vec<_>>();
+
+          old = '''    let end = run.ended_at.unwrap_or_else(Utc::now);
+          let observed_files: BTreeSet<_> = data
+              .events
+              .iter()
+              .filter(|event| event.timestamp >= run.started && event.timestamp <= end)
+              .filter_map(|event| event.path.as_ref())
+              .collect();
           '''
-          text = text[:files_start] + replacement + text[status_start:]
+          new = '''    let attributed_files = data
+              .events
+              .iter()
+              .filter(|event| event.run_id.as_deref() == Some(run.id.as_str()))
+              .filter(|event| event.kind.starts_with("agent.file."))
+              .filter_map(|event| {
+                  event.path.as_ref().map(|path| {
+                      (
+                          event.kind.strip_prefix("agent.file.").unwrap_or("modified"),
+                          path,
+                      )
+                  })
+              })
+              .collect::<Vec<_>>();
+          '''
+          if old not in text:
+              raise SystemExit("run details time-window block not found")
+          text = text.replace(old, new, 1)
           text = text.replace(
-              '                "Observed files (time window)",',
-              '                "Files attributed to run",',
+              '            "Observed files (time window)",',
+              '            "Files attributed to run",',
               1,
           )
           text = text.replace(
-              "    let file_limit = area.height.saturating_sub(15) as usize;\n    if observed_files.is_empty() {",
-              "    let file_limit = area.height.saturating_sub(15) as usize;\n    if attributed_files.is_empty() {",
-              1,
-          )
-          text = text.replace(
-              '''        for path in observed_files.iter().take(file_limit) {
-              lines.push(Line::raw(format!("  {}", path.display())));
-          }
-          if observed_files.len() > file_limit {
+              '''    if observed_files.is_empty() {
               lines.push(Line::styled(
-                  format!("  +{} more", observed_files.len() - file_limit),''',
-              '''        for (change, path) in attributed_files.iter().take(file_limit) {
-              lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
-          }
-          if attributed_files.len() > file_limit {
+                  "  none recorded (watcher may be inactive)",
+                  Style::default().fg(Color::DarkGray),
+              ));
+          } else {
+              for path in observed_files.iter().take(file_limit) {
+                  lines.push(Line::raw(format!("  {}", path.display())));
+              }
+              if observed_files.len() > file_limit {
+                  lines.push(Line::styled(
+                      format!("  +{} more", observed_files.len() - file_limit),
+                      Style::default().fg(Color::DarkGray),
+                  ));
+              }
+          }''',
+              '''    if attributed_files.is_empty() {
               lines.push(Line::styled(
-                  format!("  +{} more", attributed_files.len() - file_limit),''',
-              1,
-          )
-          text = text.replace(
-              '"  none recorded (watcher may be inactive)",',
-              '"  no net file changes recorded",',
+                  "  no net file changes recorded",
+                  Style::default().fg(Color::DarkGray),
+              ));
+          } else {
+              for (change, path) in attributed_files.iter().take(file_limit) {
+                  lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
+              }
+              if attributed_files.len() > file_limit {
+                  lines.push(Line::styled(
+                      format!("  +{} more", attributed_files.len() - file_limit),
+                      Style::default().fg(Color::DarkGray),
+                  ));
+              }
+          }''',
               1,
           )
           dashboard.write_text(text)
@@ -491,7 +105,6 @@ jobs:
           readme = Path("README.md")
           text = readme.read_text()
           if "## Quick start" not in text:
-              marker = "## Commands\n"
               quick = '''## Quick start
 
 Prerequisites: Rust toolchain and the Codex CLI available in `PATH`.
@@ -516,10 +129,13 @@ agentwatch codex -- "Fix the failing tests"
 That is enough for lifecycle events, live stdout/stderr, policy checks, and run-scoped net file attribution. `agentwatch watch` is optional and adds ambient realtime filesystem events from all writers.
 
 '''
-              text = text.replace(marker, quick + marker, 1)
-          old = "The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active."
-          new = "The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing."
-          text = text.replace(old, new, 1)
+              text = text.replace("## Commands\n", quick + "## Commands\n", 1)
+
+          text = text.replace(
+              "The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.",
+              "The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing.",
+              1,
+          )
           text = text.replace(
               "11. Optional safe control actions",
               "11. Run-scoped net file attribution ✅\n12. Optional safe control actions",
@@ -550,10 +166,10 @@ That is enough for lifecycle events, live stdout/stderr, policy checks, and run-
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/attribution.rs src/main.rs src/session.rs src/agent.rs src/dashboard.rs README.md
+          git add src README.md
           if git diff --cached --quiet; then
             echo "No changes to commit"
             exit 0
           fi
-          git commit -m "feat: attribute net file changes to agent runs"
+          git commit -m "feat: finish run-scoped file attribution"
           git push
