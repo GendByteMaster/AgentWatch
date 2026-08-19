@@ -13,11 +13,13 @@ AgentWatch is a small Rust CLI for observing repository changes while coding wit
 - Run coding agents through provider adapters
 - Run OpenAI Codex through `codex exec`
 - Track agent lifecycle, run IDs, durations, providers, and model metadata when available
+- Display a live read-only terminal dashboard with Ratatui
 
 ## Commands
 
 ```bash
 cargo run -- start
+cargo run -- tui
 cargo run -- watch
 cargo run -- status
 cargo run -- diff
@@ -33,6 +35,7 @@ Or after installation:
 
 ```bash
 agentwatch start
+agentwatch tui
 agentwatch watch
 agentwatch status
 agentwatch diff
@@ -50,9 +53,12 @@ agentwatch stop
 agentwatch start
 
 # terminal A
-agentwatch watch
+agentwatch tui
 
 # terminal B
+agentwatch watch
+
+# terminal C
 agentwatch codex -- "Implement the next task and run the relevant tests"
 agentwatch run -- cargo clippy
 
@@ -65,6 +71,31 @@ agentwatch stop
 `run` executes a child process with inherited stdin/stdout/stderr and records its exit code. A `deny` policy prevents the command from starting. A `warn` policy prints a warning but allows execution.
 
 `codex` uses the Codex provider adapter and executes `codex exec ...`. Codex must already be installed and available in `PATH`.
+
+## TUI
+
+`agentwatch tui` opens a live read-only dashboard over the current session. It refreshes automatically and currently shows:
+
+- session status, start time, and uptime
+- repository branch and Git `+lines/-lines`
+- changed files
+- policy event count
+- recorded commands and tests
+- live/completed/failed agent runs
+- recent JSONL events
+- agent lifecycle tail
+- session event count and storage size
+
+Keys:
+
+```text
+q / Esc   quit
+r         refresh now
+```
+
+The first TUI version is intentionally read-only. Process controls such as kill, retry, or approval are not exposed yet.
+
+The `Latest Output / Agent Tail` panel currently displays agent lifecycle events. Capturing actual Codex stdout/stderr requires a tee/capture layer and is planned as a separate step so provider output capture does not get mixed into the core event model.
 
 ## Agent providers
 
@@ -82,7 +113,7 @@ codex exec <args>
 
 If Codex is invoked with `-m <model>` or `--model <model>`, AgentWatch stores that model in lifecycle events.
 
-This keeps the event, policy, and session layers independent from Codex and leaves room for Claude Code or other providers later.
+This keeps the event, policy, session, and TUI layers independent from Codex and leaves room for Claude Code or other providers later.
 
 ## Storage
 
@@ -111,7 +142,7 @@ A successful run can look like:
 {"kind":"agent.completed","provider":"codex","run_id":"run-...","command":"codex exec ...","exit_code":0,"duration_ms":18423}
 ```
 
-A failed process emits `agent.failed`. If AgentWatch sees a `agent.started` event without a matching terminal event, the session summary reports it as an unfinished agent run.
+A failed process emits `agent.failed`. If AgentWatch sees an `agent.started` event without a matching terminal event, the session summary reports it as an unfinished agent run.
 
 The lifecycle fields are additive, so older JSONL events that used `kind = "agent"` remain readable.
 
@@ -155,4 +186,6 @@ AgentWatch is an agent-agnostic observability and policy layer. Agent-specific b
 6. Configurable risk policies ✅
 7. Codex provider integration ✅
 8. Provider lifecycle events and richer agent metadata ✅
-9. Optional TUI
+9. Read-only live TUI ✅
+10. Provider stdout/stderr capture
+11. Optional safe control actions
