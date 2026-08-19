@@ -29,6 +29,25 @@ pub struct PolicyConfig {
     pub paths: PathPolicy,
     #[serde(default)]
     pub commands: CommandPolicy,
+    #[serde(default)]
+    pub approvals: ApprovalPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct ApprovalPolicy {
+    #[serde(default = "default_approval_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_approval_timeout_seconds")]
+    pub timeout_seconds: u64,
+}
+
+impl Default for ApprovalPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: default_approval_enabled(),
+            timeout_seconds: default_approval_timeout_seconds(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,6 +180,14 @@ fn first_glob_match(patterns: &[String], value: &str) -> Result<Option<String>> 
         }
     }
     Ok(None)
+}
+
+fn default_approval_enabled() -> bool {
+    true
+}
+
+fn default_approval_timeout_seconds() -> u64 {
+    600
 }
 
 fn default_warn_paths() -> Vec<String> {
