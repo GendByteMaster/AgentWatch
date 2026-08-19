@@ -138,7 +138,10 @@ fn read_events(root: &Path) -> Result<Vec<SessionEvent>> {
 fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
     let mut runs: BTreeMap<String, AgentRun> = BTreeMap::new();
 
-    for event in events.iter().filter(|event| event.kind.starts_with("agent")) {
+    for event in events
+        .iter()
+        .filter(|event| event.kind.starts_with("agent"))
+    {
         let Some(id) = event.run_id.clone() else {
             continue;
         };
@@ -155,7 +158,10 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
         match event.kind.as_str() {
             "agent.started" => {
                 run.started = event.timestamp;
-                run.provider = event.provider.clone().unwrap_or_else(|| run.provider.clone());
+                run.provider = event
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| run.provider.clone());
                 run.command = event.command.clone().unwrap_or_else(|| run.command.clone());
             }
             "agent.failed" => {
@@ -203,8 +209,14 @@ fn git_info(root: &Path) -> GitInfo {
     if let Some(diff) = git_output(root, &["diff", "--numstat", "HEAD"]) {
         for line in diff.lines() {
             let mut parts = line.split('\t');
-            added += parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            removed += parts.next().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+            added += parts
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
+            removed += parts
+                .next()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0);
         }
     }
 
@@ -217,7 +229,11 @@ fn git_info(root: &Path) -> GitInfo {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(root).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
     output
         .status
         .success()
@@ -257,7 +273,9 @@ fn header(frame: &mut Frame, area: Rect, data: &Data) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 "AgentWatch TUI v0.1.0",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("    Session: "),
             status,
@@ -287,12 +305,20 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         ])
         .split(area);
 
-    let tests: Vec<_> = data.events.iter().filter(|event| event.kind == "test").collect();
+    let tests: Vec<_> = data
+        .events
+        .iter()
+        .filter(|event| event.kind == "test")
+        .collect();
     let failed_tests = tests
         .iter()
         .filter(|event| event.exit_code.is_some_and(|code| code != 0))
         .count();
-    let policy = data.events.iter().filter(|event| event.risk.is_some()).count();
+    let policy = data
+        .events
+        .iter()
+        .filter(|event| event.risk.is_some())
+        .count();
     let commands = data
         .events
         .iter()
@@ -310,7 +336,10 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         "Repository",
         vec![
             Line::styled("AgentWatch", Style::default().fg(Color::Cyan)),
-            Line::styled(format!("⎇ {}", data.git.branch), Style::default().fg(Color::Magenta)),
+            Line::styled(
+                format!("⎇ {}", data.git.branch),
+                Style::default().fg(Color::Magenta),
+            ),
         ],
     );
     card(
@@ -319,9 +348,15 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         "Git Changes",
         vec![
             Line::from(vec![
-                Span::styled(format!("+{}", data.git.added), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("+{}", data.git.added),
+                    Style::default().fg(Color::Green),
+                ),
                 Span::raw("   "),
-                Span::styled(format!("-{}", data.git.removed), Style::default().fg(Color::Red)),
+                Span::styled(
+                    format!("-{}", data.git.removed),
+                    Style::default().fg(Color::Red),
+                ),
             ]),
             Line::raw(format!("~ {} files", data.git.files.len())),
         ],
@@ -349,8 +384,14 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         areas[4],
         "Agent Runs",
         vec![
-            Line::styled(data.runs.len().to_string(), Style::default().fg(Color::Magenta)),
-            Line::styled(format!("Failed: {failed_runs}"), status_color(failed_runs == 0)),
+            Line::styled(
+                data.runs.len().to_string(),
+                Style::default().fg(Color::Magenta),
+            ),
+            Line::styled(
+                format!("Failed: {failed_runs}"),
+                status_color(failed_runs == 0),
+            ),
         ],
     );
     card(
@@ -358,8 +399,14 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         areas[5],
         "Tests",
         vec![
-            Line::styled(format!("{} total", tests.len()), Style::default().fg(Color::Cyan)),
-            Line::styled(format!("{} failed", failed_tests), status_color(failed_tests == 0)),
+            Line::styled(
+                format!("{} total", tests.len()),
+                Style::default().fg(Color::Cyan),
+            ),
+            Line::styled(
+                format!("{} failed", failed_tests),
+                status_color(failed_tests == 0),
+            ),
         ],
     );
 }
@@ -402,8 +449,10 @@ fn split(area: Rect) -> std::rc::Rc<[Rect]> {
 }
 
 fn agents(frame: &mut Frame, area: Rect, data: &Data) {
-    let header = Row::new(["Status", "Provider", "Run ID", "Command", "Duration", "Started"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new([
+        "Status", "Provider", "Run ID", "Command", "Duration", "Started",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
     let rows = data.runs.iter().take(8).map(|run| {
         let (label, color) = match run.status {
             RunStatus::Running => ("● Running", Color::Green),
@@ -438,7 +487,11 @@ fn agents(frame: &mut Frame, area: Rect, data: &Data) {
         )
         .header(header)
         .column_spacing(1)
-        .block(Block::default().title("Agents (live)").borders(Borders::ALL)),
+        .block(
+            Block::default()
+                .title("Agents (live)")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -466,7 +519,11 @@ fn files(frame: &mut Frame, area: Rect, data: &Data) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title("Files (changed)").borders(Borders::ALL)),
+        Paragraph::new(lines).block(
+            Block::default()
+                .title("Files (changed)")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -482,7 +539,12 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data) {
                 .path
                 .as_ref()
                 .map(|path| format!("path={}", path.display()))
-                .or_else(|| event.command.as_ref().map(|cmd| format!("cmd={}", short(cmd, 48))))
+                .or_else(|| {
+                    event
+                        .command
+                        .as_ref()
+                        .map(|cmd| format!("cmd={}", short(cmd, 48)))
+                })
                 .unwrap_or_default();
             Line::from(vec![
                 Span::styled(
@@ -498,18 +560,32 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().title("Recent Events").borders(Borders::ALL)),
+        Paragraph::new(lines).block(
+            Block::default()
+                .title("Recent Events")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
 
 fn tests(frame: &mut Frame, area: Rect, data: &Data) {
-    let tests: Vec<_> = data.events.iter().filter(|event| event.kind == "test").collect();
-    let passed = tests.iter().filter(|event| event.exit_code == Some(0)).count();
+    let tests: Vec<_> = data
+        .events
+        .iter()
+        .filter(|event| event.kind == "test")
+        .collect();
+    let passed = tests
+        .iter()
+        .filter(|event| event.exit_code == Some(0))
+        .count();
     let failed = tests.len().saturating_sub(passed);
     let mut lines = vec![
         Line::raw(format!("Runs:   {}", tests.len())),
-        Line::styled(format!("Passed: {passed}"), Style::default().fg(Color::Green)),
+        Line::styled(
+            format!("Passed: {passed}"),
+            Style::default().fg(Color::Green),
+        ),
         Line::styled(format!("Failed: {failed}"), status_color(failed == 0)),
     ];
     if let Some(last) = tests.last() {
