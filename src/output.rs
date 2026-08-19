@@ -128,7 +128,7 @@ pub fn read_tail(
         let Ok(record) = serde_json::from_slice::<AgentOutputRecord>(line) else {
             continue;
         };
-        if &record.timestamp >= since {
+        if record.timestamp >= *since {
             records.push(record);
         }
     }
