@@ -21,31 +21,41 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Apply tool observability patch
-        run: python .github/patch_tool_observability.py
-
-      - name: Format
-        run: cargo fmt --all
-
-      - name: Apply Clippy fixes
-        run: cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged -- -D warnings
-
-      - name: Format after fixes
-        run: cargo fmt --all
-
-      - name: Check
-        run: cargo check --all-targets --all-features
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Test
-        run: cargo test --all-targets --all-features
-
-      - name: Commit validated changes
+      - name: Patch, validate, and report
+        shell: bash
         run: |
+          set +e
+          LOG=/tmp/tool-observability.log
+          : > "$LOG"
+
+          run_step() {
+            echo "" | tee -a "$LOG"
+            echo "===== $1 =====" | tee -a "$LOG"
+            shift
+            "$@" 2>&1 | tee -a "$LOG"
+            return ${PIPESTATUS[0]}
+          }
+
+          run_step "Patch" python .github/patch_tool_observability.py
+          RC=$?
+          if [ "$RC" -eq 0 ]; then run_step "Format" cargo fmt --all; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then run_step "Clippy fix" cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged -- -D warnings; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then run_step "Format after fix" cargo fmt --all; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then run_step "Check" cargo check --all-targets --all-features; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then run_step "Clippy" cargo clippy --all-targets --all-features -- -D warnings; RC=$?; fi
+          if [ "$RC" -eq 0 ]; then run_step "Test" cargo test --all-targets --all-features; RC=$?; fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$RC" -ne 0 ]; then
+            cp "$LOG" .github/tool-observability-validation.log
+            git add .github/tool-observability-validation.log
+            git commit -m "ci: capture tool observability validation failure" || true
+            git push || true
+            exit "$RC"
+          fi
+
           git add src README.md Cargo.lock
           if git diff --cached --quiet; then
             echo "No changes to commit"
