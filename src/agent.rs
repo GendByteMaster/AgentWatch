@@ -15,6 +15,7 @@ use crate::{
     output::AgentOutputLog,
     policy::{self, Decision},
     provider::AgentProvider,
+    run_diff,
     session,
 };
 
@@ -72,10 +73,47 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
     );
 
     let started = Instant::now();
-    let status = match execute_agent(root, provider.executable(), provider.name(), &args, &run_id) {
-        Ok(status) => status,
+    let execution = execute_agent(root, provider.executable(), provider.name(), &args, &run_id);
+    let duration_ms = elapsed_ms(started);
+
+    match execution {
+        Ok(status) => {
+            record_run_artifacts(root, provider.name(), &run_id, attribution_before);
+
+            let exit_code = status.code().unwrap_or(-1);
+            let kind = if status.success() {
+                "agent.completed"
+            } else {
+                "agent.failed"
+            };
+
+            session::record_agent_lifecycle(
+                root,
+                kind,
+                &run_id,
+                provider.name(),
+                model.as_deref(),
+                &display,
+                Some(exit_code),
+                Some(duration_ms),
+                policy_risk,
+            )?;
+
+            if status.success() {
+                println!(
+                    "AgentWatch: {} completed successfully [{run_id}] in {duration_ms}ms",
+                    provider.name()
+                );
+                Ok(())
+            } else {
+                bail!(
+                    "{} exited with code {exit_code} [{run_id}] after {duration_ms}ms: {display}",
+                    provider.name()
+                )
+            }
+        }
         Err(error) => {
-            let duration_ms = elapsed_ms(started);
+            record_run_artifacts(root, provider.name(), &run_id, attribution_before);
             session::record_agent_lifecycle(
                 root,
                 "agent.failed",
@@ -87,49 +125,14 @@ pub fn run<P: AgentProvider>(root: &Path, provider: P, user_args: &[String]) -> 
                 Some(duration_ms),
                 policy_risk,
             )?;
-            return Err(error).with_context(|| {
+            Err(error).with_context(|| {
                 format!(
                     "failed to execute `{}`; is {} installed and available in PATH?",
                     provider.executable(),
                     provider.name()
                 )
-            });
+            })
         }
-    };
-
-    record_attributed_files(root, provider.name(), &run_id, attribution_before);
-
-    let duration_ms = elapsed_ms(started);
-    let exit_code = status.code().unwrap_or(-1);
-    let kind = if status.success() {
-        "agent.completed"
-    } else {
-        "agent.failed"
-    };
-
-    session::record_agent_lifecycle(
-        root,
-        kind,
-        &run_id,
-        provider.name(),
-        model.as_deref(),
-        &display,
-        Some(exit_code),
-        Some(duration_ms),
-        policy_risk,
-    )?;
-
-    if status.success() {
-        println!(
-            "AgentWatch: {} completed successfully [{run_id}] in {duration_ms}ms",
-            provider.name()
-        );
-        Ok(())
-    } else {
-        bail!(
-            "{} exited with code {exit_code} [{run_id}] after {duration_ms}ms: {display}",
-            provider.name()
-        )
     }
 }
 
@@ -147,7 +150,7 @@ fn capture_worktree(root: &Path) -> Result<Option<WorktreeSnapshot>> {
     }
 }
 
-fn record_attributed_files(
+fn record_run_artifacts(
     root: &Path,
     provider: &str,
     run_id: &str,
@@ -163,28 +166,43 @@ fn record_attributed_files(
             return;
         }
     };
-    let changes = match before.changes(root, &after) {
-        Ok(changes) => changes,
+
+    match before.changes(root, &after) {
+        Ok(changes) => {
+            let mut failures = 0_usize;
+            for change in changes {
+                if let Err(error) = session::record_agent_file(
+                    root,
+                    run_id,
+                    provider,
+                    change.kind.as_str(),
+                    &change.path,
+                ) {
+                    failures += 1;
+                    eprintln!(
+                        "AgentWatch warning: failed to record attributed file {}: {error}",
+                        change.path.display()
+                    );
+                }
+            }
+            if failures > 0 {
+                eprintln!("AgentWatch warning: {failures} attributed file events were not persisted");
+            }
+        }
         Err(error) => {
             eprintln!("AgentWatch warning: failed to compare run file changes: {error}");
-            return;
-        }
-    };
-
-    let mut failures = 0_usize;
-    for change in changes {
-        if let Err(error) =
-            session::record_agent_file(root, run_id, provider, change.kind.as_str(), &change.path)
-        {
-            failures += 1;
-            eprintln!(
-                "AgentWatch warning: failed to record attributed file {}: {error}",
-                change.path.display()
-            );
         }
     }
-    if failures > 0 {
-        eprintln!("AgentWatch warning: {failures} attributed file events were not persisted");
+
+    match before.diff(root, &after) {
+        Ok(diff) => {
+            if let Err(error) = run_diff::persist(root, run_id, &diff) {
+                eprintln!("AgentWatch warning: failed to persist run diff: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("AgentWatch warning: failed to generate run diff: {error}");
+        }
     }
 }
 
