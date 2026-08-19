@@ -1,141 +1,519 @@
 # AgentWatch
 
-AgentWatch is a small Rust CLI for observing repository changes while coding with AI agents or manually.
+**AgentWatch is a Rust observability and policy layer for AI coding agents.**
 
-## MVP
+It sits between your repository and an agent such as Codex, records what happened during each run, captures live output, tracks repository changes, evaluates risky operations, and exposes the session through a terminal dashboard.
 
-- Watch filesystem changes in the current project
-- Show Git working-tree status and diff
-- Persist compact session metadata plus an append-only JSONL event stream
-- Track commands and common test runners
-- Summarize duration, events, touched files, Git `+lines/-lines`, tests, commands, agent runs, and policy events
-- Apply configurable path and command policies with `allow`, `warn`, and `deny` decisions
-- Run coding agents through provider adapters
-- Run OpenAI Codex through `codex exec`
-- Track agent lifecycle, run IDs, durations, providers, and model metadata when available
-- Capture agent stdout/stderr without hiding it from the terminal
-- Display a live read-only terminal dashboard with Ratatui
+The goal is simple: when an AI agent is working in a real codebase, you should be able to answer:
+
+- Which agent is running right now?
+- What command was started?
+- Which model was used?
+- What is the agent printing?
+- Which files changed during that run?
+- Did the run succeed or fail?
+- Were sensitive paths or dangerous commands involved?
+- What happened across the entire development session?
+
+AgentWatch is designed to stay **agent-agnostic**. Codex is the first provider integration, while lifecycle tracking, policies, storage, file attribution, and the TUI remain independent from any single agent.
+
+---
+
+## Features
+
+### Agent observability
+
+- persistent development sessions
+- unique `run_id` for every observed agent execution
+- provider and model metadata
+- `agent.started`, `agent.completed`, and `agent.failed` lifecycle events
+- duration and exit-code tracking
+- unfinished-run detection
+- append-only event history
+
+### Live agent output
+
+Agent stdout/stderr can be captured without hiding it from the terminal.
+
+When a session is active, AgentWatch behaves like a tee:
+
+```text
+Agent process
+   │
+   ├── stdout/stderr ───────────────► current terminal
+   │
+   └── captured output
+            │
+            ▼
+.agentwatch/agent-output.jsonl
+            │
+            ▼
+      AgentWatch TUI
+```
+
+This allows you to keep working normally while the TUI follows the same run in real time.
+
+### Run-scoped file attribution
+
+For AgentWatch-controlled provider runs, the repository worktree is snapshotted before and after execution.
+
+AgentWatch then emits run-scoped events such as:
+
+```text
+agent.file.created
+agent.file.modified
+agent.file.deleted
+```
+
+Each event carries the corresponding `run_id`, allowing the TUI to show the net file changes associated with the selected agent run.
+
+### Policy engine
+
+AgentWatch can evaluate both file paths and commands using configurable rules:
+
+```text
+allow
+warn
+deny
+ignore
+```
+
+Policies are evaluated before provider commands are launched, so a denied command never starts.
+
+### Repository monitoring
+
+- filesystem change monitoring
+- Git branch detection
+- changed-file overview
+- Git `+lines / -lines` statistics
+- command and test-run tracking
+- policy-event tracking
+
+### Interactive terminal dashboard
+
+The Ratatui-based dashboard shows the current session, live agent runs, events, output, changed files, test activity, policy information, and details for the selected run.
+
+---
+
+## Architecture
+
+```text
+                         ┌──────────────────────┐
+                         │      Developer       │
+                         └──────────┬───────────┘
+                                    │
+                              agentwatch codex
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────┐
+│                         AgentWatch                         │
+│                                                            │
+│  ┌────────────┐    ┌──────────────┐    ┌───────────────┐ │
+│  │  Provider  │───►│ Policy Engine│───►│ Agent Process │ │
+│  │  Adapter   │    └──────────────┘    └───────┬───────┘ │
+│  └────────────┘                                │         │
+│                                               │         │
+│                         stdout / stderr ◄──────┘         │
+│                               │                          │
+│                 ┌─────────────┴────────────┐             │
+│                 ▼                          ▼             │
+│          Terminal mirror           Output JSONL         │
+│                                                            │
+│  ┌────────────────┐   ┌────────────────┐   ┌───────────┐ │
+│  │ Session Engine │   │ File Attribution│   │ Git State │ │
+│  └───────┬────────┘   └────────┬───────┘   └─────┬─────┘ │
+│          │                     │                 │       │
+│          └──────────────┬──────┴─────────────────┘       │
+│                         ▼                                │
+│                 Append-only events                       │
+└─────────────────────────┬──────────────────────────────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │   Ratatui TUI    │
+                 └──────────────────┘
+```
+
+The core intentionally separates provider-specific execution from session storage, policy evaluation, attribution, and visualization.
+
+---
 
 ## Quick start
 
-Prerequisites: Rust toolchain and the Codex CLI available in `PATH`.
+### Prerequisites
+
+- Rust toolchain
+- Git
+- Codex CLI available in `PATH` for the current provider integration
+
+### Install from source
 
 ```bash
 git clone https://github.com/GendByteMaster/AgentWatch.git
 cd AgentWatch
 cargo install --path .
+```
+
+Start an AgentWatch session inside the repository you want to observe:
+
+```bash
 agentwatch start
 ```
 
-Then use two terminals in the same project:
+Open the dashboard in one terminal:
 
 ```bash
-# terminal 1
 agentwatch tui
+```
 
-# terminal 2
+Run Codex through AgentWatch in another terminal:
+
+```bash
 agentwatch codex -- "Fix the failing tests"
 ```
 
-That is enough for lifecycle events, live stdout/stderr, policy checks, and run-scoped net file attribution. `agentwatch watch` is optional and adds ambient realtime filesystem events from all writers.
+That is enough to get:
 
-## Commands
+- agent lifecycle tracking
+- live stdout/stderr capture
+- policy evaluation
+- duration and exit-code metadata
+- run-scoped net file attribution
+- live TUI updates
+
+`agentwatch watch` is optional. It adds ambient realtime filesystem events for changes made by all writers in the repository.
+
+---
+
+## Typical workflow
 
 ```bash
-cargo run -- start
-cargo run -- tui
-cargo run -- watch
-cargo run -- status
-cargo run -- diff
-cargo run -- run -- cargo test
-cargo run -- codex -- "Fix the failing tests"
-cargo run -- check-path .env
-cargo run -- check-command -- git reset --hard HEAD
-cargo run -- session
-cargo run -- stop
+# Start one persistent development session
+agentwatch start
+
+# Terminal A: dashboard
+agentwatch tui
+
+# Terminal B: optional ambient filesystem watcher
+agentwatch watch
+
+# Terminal C: run an agent through AgentWatch
+agentwatch codex -- "Implement the next task and run the relevant tests"
+
+# Track other commands or tests as part of the same session
+agentwatch run -- cargo clippy
+agentwatch run -- cargo test
+
+# Inspect the current session from the CLI
+agentwatch session
+
+# Finish the session and print its summary
+agentwatch stop
 ```
 
-Or after installation:
+---
+
+## Command reference
+
+| Command | Purpose |
+|---|---|
+| `agentwatch start` | Start a persistent AgentWatch session |
+| `agentwatch stop` | Stop the active session and print a summary |
+| `agentwatch session` | Show the active or most recent session summary |
+| `agentwatch tui` | Open the live terminal dashboard |
+| `agentwatch watch` | Watch repository filesystem activity |
+| `agentwatch status` | Show Git working-tree changes and risk hints |
+| `agentwatch diff` | Print the current Git diff |
+| `agentwatch run -- <command>` | Execute and record a command or test run |
+| `agentwatch codex -- <args>` | Execute Codex through the provider layer |
+| `agentwatch check-path <path>` | Evaluate a path against the policy engine |
+| `agentwatch check-command -- <command>` | Evaluate a command without executing it |
+
+Most commands accept a project path. The default is the current directory.
+
+Examples:
 
 ```bash
-agentwatch start
-agentwatch tui
-agentwatch watch
 agentwatch status
 agentwatch diff
 agentwatch run -- cargo test
-agentwatch codex -- "Fix the failing tests"
+agentwatch codex -- -m gpt-5.6-sol "Refactor the parser"
 agentwatch check-path .env
 agentwatch check-command -- git reset --hard HEAD
-agentwatch session
-agentwatch stop
 ```
 
-## Typical flow
-
-```bash
-agentwatch start
-
-# terminal A
-agentwatch tui
-
-# terminal B
-agentwatch watch
-
-# terminal C
-agentwatch codex -- "Implement the next task and run the relevant tests"
-agentwatch run -- cargo clippy
-
-agentwatch session
-agentwatch stop
-```
-
-`watch` records filesystem events into the active append-only JSONL event log. AgentWatch applies path policy before printing or recording noisy paths.
-
-`run` executes a child process with inherited stdin/stdout/stderr and records its exit code. A `deny` policy prevents the command from starting. A `warn` policy prints a warning but allows execution.
-
-`codex` uses the Codex provider adapter and executes `codex exec ...`. Codex must already be installed and available in `PATH`.
-
-When an AgentWatch session is active, provider stdout/stderr is piped through a tee layer. Output is still mirrored to the original terminal while each line is appended to `agent-output.jsonl` for the live TUI. Without an active session, provider stdio is inherited directly as before.
+---
 
 ## TUI
 
-`agentwatch tui` opens a live read-only dashboard over the current session. It refreshes automatically and currently shows:
+Run:
+
+```bash
+agentwatch tui
+```
+
+The dashboard refreshes automatically and currently includes:
 
 - session status, start time, and uptime
-- repository branch and Git `+lines/-lines`
+- current Git branch
+- Git line delta
 - changed files
-- policy event count
+- policy-event count
 - recorded commands and tests
-- live/completed/failed agent runs
-- recent lifecycle/event records
+- running/completed/failed agent runs
+- recent lifecycle and repository events
 - live provider stdout/stderr
-- selected run details: model, exact command, timing, exit code, policy risk, and observed files
+- selected-run metadata
+- exact provider command
+- model metadata when available
+- duration and exit code
+- policy risk
+- files attributed to the selected run
 
-The interactive focus cycles through `Agents -> Events -> Output`. The selected agent run is highlighted, and the output panel filters to that run by default. You can switch the output panel back to all runs at any time.
-
-The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing.
-
-Keys:
+### Navigation
 
 ```text
 Tab / Shift+Tab   next / previous focused panel
 Up / Down         select agent or scroll focused panel
 j / k             Down / Up aliases
 PageUp / PageDown scroll by 5 items
-Home / End        newest / oldest boundary
+Home / End        jump to boundary
  a                all runs / selected run output
  r                refresh now
  q / Esc          quit
 ```
 
-The TUI remains intentionally read-only. Process controls such as kill, retry, or approval are not exposed yet.
+The dashboard is intentionally **read-only** today. AgentWatch does not yet expose kill, retry, or approval controls from the TUI.
 
-The `Live Agent Output` panel reads only the tail of the output stream instead of reparsing the entire file every refresh. Records from older AgentWatch sessions are filtered out by the current session start timestamp.
+### Selected run details
 
-## Agent providers
+Selecting an agent run updates both the output scope and the details panel.
 
-Agent integrations are intentionally separated from the core through the `AgentProvider` trait. A provider defines its name, executable, argument transformation, and optional model extraction. The current Codex provider converts:
+Example:
+
+```text
+Run Details
+────────────────────────────
+Run ID:     run-...
+Provider:   codex
+Model:      gpt-5.6-sol
+Status:     completed
+Started:    18:22:11
+Ended:      18:23:04
+Duration:   00:53
+Exit code:  0
+Policy:     allow
+Command:    codex exec ...
+
+Files attributed to run
+  modified src/main.rs
+  created  src/parser.rs
+  deleted  src/legacy.rs
+```
+
+---
+
+## File attribution model
+
+AgentWatch uses **run-scoped net worktree attribution** for provider runs that it launches itself.
+
+Before the process starts, AgentWatch snapshots repository state. After the process exits, it snapshots the worktree again and compares both states.
+
+The resulting events are attached directly to the run:
+
+```json
+{
+  "kind": "agent.file.modified",
+  "run_id": "run-...",
+  "path": "src/main.rs"
+}
+```
+
+This is substantially stronger than attributing filesystem events only by timestamp because the relationship is persisted explicitly through `run_id`.
+
+### Attribution limitation
+
+The attribution represents **net changes observed during an AgentWatch-controlled run**.
+
+If another editor, script, watcher, or agent modifies the same worktree at the same time, AgentWatch cannot perfectly identify which process produced an overlapping change using repository snapshots alone. Perfect concurrent attribution would require OS-level process/file tracing or deeper sandbox instrumentation.
+
+For an isolated run, attribution is deterministic at the worktree level.
+
+---
+
+## Agent lifecycle
+
+Every provider execution receives a generated `run_id`.
+
+The normal lifecycle is:
+
+```text
+agent.started
+      │
+      ├──► agent.completed
+      │
+      └──► agent.failed
+```
+
+Example event stream:
+
+```json
+{"kind":"agent.started","provider":"codex","run_id":"run-...","command":"codex exec ..."}
+{"kind":"agent.file.modified","run_id":"run-...","path":"src/main.rs"}
+{"kind":"agent.completed","provider":"codex","run_id":"run-...","exit_code":0,"duration_ms":18423}
+```
+
+If AgentWatch sees `agent.started` without a matching terminal lifecycle event, the run is reported as unfinished.
+
+Older event records using `kind = "agent"` remain readable for backwards compatibility.
+
+---
+
+## Provider output capture
+
+During an active session, AgentWatch captures provider stdout/stderr line-by-line while still mirroring it to the original terminal.
+
+Captured records are stored separately from lifecycle events:
+
+```json
+{
+  "timestamp": "2026-08-19T15:00:00Z",
+  "run_id": "run-...",
+  "provider": "codex",
+  "stream": "stdout",
+  "text": "Running cargo test"
+}
+```
+
+The TUI reads only the tail of this stream rather than reparsing the entire file on every refresh.
+
+Keeping output separate also prevents large agent responses from inflating the core lifecycle log.
+
+---
+
+## Policy engine
+
+AgentWatch reads `.agentwatch.toml` from the repository root.
+
+If the file does not exist, built-in safe defaults are used.
+
+Example configuration:
+
+```toml
+[paths]
+warn = [
+  "**/.env*",
+  "**/*auth*",
+  "**/*migration*"
+]
+
+deny = [
+  "**/*.pem",
+  "**/*.key"
+]
+
+ignore = [
+  ".git/**",
+  ".agentwatch/**",
+  "target/**",
+  "node_modules/**",
+  ".next/**"
+]
+
+[commands]
+warn = [
+  "git reset --hard",
+  "docker system prune"
+]
+
+deny = [
+  "rm -rf /",
+  "rm -rf /*"
+]
+```
+
+### Path precedence
+
+```text
+ignore → deny → warn → allow
+```
+
+### Command precedence
+
+```text
+deny → warn → allow
+```
+
+A denied provider command is blocked before execution.
+
+A warning is recorded and printed, but execution continues.
+
+You can inspect policy decisions without executing anything:
+
+```bash
+agentwatch check-path src/auth/session.rs
+agentwatch check-command -- docker system prune -a
+```
+
+---
+
+## Storage
+
+Session state lives inside the observed repository:
+
+```text
+.agentwatch/
+├── session.json
+├── events.jsonl
+└── agent-output.jsonl
+```
+
+### `session.json`
+
+Compact metadata for the persistent development session:
+
+- repository root
+- start time
+- stop time
+- active/stopped state
+
+### `events.jsonl`
+
+Append-only structured events including:
+
+- filesystem activity
+- commands
+- tests
+- policy events
+- provider lifecycle events
+- run-scoped file attribution
+
+### `agent-output.jsonl`
+
+Append-only provider output records containing:
+
+- timestamp
+- `run_id`
+- provider
+- stream (`stdout` / `stderr`)
+- captured text
+
+`.agentwatch/` is ignored by the repository's default `.gitignore` configuration.
+
+---
+
+## Provider architecture
+
+Agent integrations are separated from the core through the `AgentProvider` trait.
+
+A provider defines concepts such as:
+
+- provider name
+- executable
+- argument transformation
+- optional model extraction
+
+The current Codex provider transforms:
 
 ```text
 agentwatch codex -- <args>
@@ -147,90 +525,142 @@ into:
 codex exec <args>
 ```
 
-If Codex is invoked with `-m <model>` or `--model <model>`, AgentWatch stores that model in lifecycle events.
+If Codex is invoked with `-m <model>` or `--model <model>`, AgentWatch records that model in lifecycle metadata.
 
-This keeps the event, policy, session, output-capture, and TUI layers independent from Codex and leaves room for Claude Code or other providers later.
-
-## Storage
+This separation means the following components do not need to know Codex-specific behavior:
 
 ```text
-.agentwatch/
-├── session.json        # compact session metadata
-├── events.jsonl        # append-only lifecycle / filesystem / command events
-└── agent-output.jsonl  # append-only provider stdout/stderr records
+Session Engine
+Policy Engine
+Output Capture
+File Attribution
+Event Storage
+TUI
 ```
 
-The main event log stays separate from provider output so long agent responses do not inflate lifecycle/session processing.
+That architecture leaves room for additional coding-agent providers later.
 
-A captured output record looks like:
+---
 
-```json
-{"timestamp":"2026-08-19T15:00:00Z","run_id":"run-...","provider":"codex","stream":"stdout","text":"Running cargo test"}
-```
+## Session summaries
 
-### Agent lifecycle
+`agentwatch session` and `agentwatch stop` summarize the current development session, including:
 
-Each observed agent run receives a `run_id` and emits lifecycle events:
+- session duration
+- event count
+- files touched
+- Git line delta
+- command count
+- test count and failures
+- agent run count
+- failed and unfinished runs
+- aggregate agent time
+- observed providers
+- policy-event count
 
-```text
-agent.started
-    -> agent.completed
-    -> agent.failed
-```
+This gives a compact CLI report even when the TUI is not running.
 
-A successful run can look like:
+---
 
-```json
-{"kind":"agent.started","provider":"codex","run_id":"run-...","command":"codex exec ..."}
-{"kind":"agent.completed","provider":"codex","run_id":"run-...","command":"codex exec ...","exit_code":0,"duration_ms":18423}
-```
+## Development
 
-A failed process emits `agent.failed`. If AgentWatch sees an `agent.started` event without a matching terminal event, the session summary reports it as an unfinished agent run.
-
-The lifecycle fields are additive, so older JSONL events that used `kind = "agent"` remain readable.
-
-## Policy
-
-AgentWatch reads `.agentwatch.toml` from the project root. If the file is absent, built-in safe defaults are used. Copy `.agentwatch.toml.example` to `.agentwatch.toml` to customize them.
-
-```toml
-[paths]
-warn = ["**/.env*", "**/*auth*", "**/*migration*"]
-deny = ["**/*.pem", "**/*.key"]
-ignore = [".git/**", ".agentwatch/**", "target/**", "node_modules/**"]
-
-[commands]
-warn = ["git reset --hard", "docker system prune"]
-deny = ["rm -rf /", "rm -rf /*"]
-```
-
-Policy precedence for paths is `ignore -> deny -> warn -> allow`. Command policy is `deny -> warn -> allow`.
-
-Agent provider commands are evaluated by the same command policy before their process starts.
-
-You can inspect a decision without executing anything:
+Clone the repository and use the normal Rust toolchain:
 
 ```bash
-agentwatch check-path src/auth/session.rs
-agentwatch check-command -- docker system prune -a
+git clone https://github.com/GendByteMaster/AgentWatch.git
+cd AgentWatch
+cargo check --all-targets --all-features
+cargo test --all-targets --all-features
 ```
 
-## Philosophy
+Before committing:
 
-AgentWatch is an agent-agnostic observability and policy layer. Agent-specific behavior belongs in provider adapters rather than the core event and policy model.
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-targets --all-features
+```
+
+The repository CI enforces formatting, compilation, Clippy with warnings denied, and tests.
+
+---
+
+## Design principles
+
+**Agent-agnostic core.** Provider-specific behavior stays in adapters instead of leaking into session or policy logic.
+
+**Append-only observability.** Historical events are persisted rather than continuously rewriting large session documents.
+
+**Terminal-first workflow.** AgentWatch should fit naturally beside existing shells, editors, Git, and coding-agent CLIs.
+
+**Read before control.** Observability and trustworthy attribution come before destructive TUI actions such as kill or retry.
+
+**Explicit limitations.** AgentWatch should distinguish deterministic metadata from best-effort inference rather than presenting heuristics as certainty.
+
+---
+
+## Current limitations
+
+- Codex is currently the first implemented provider adapter.
+- The TUI is read-only.
+- Output capture is session-scoped and currently stored locally as JSONL.
+- Run file attribution represents net worktree changes rather than a complete syscall-level write history.
+- Concurrent writers can make exact process attribution ambiguous.
+- AgentWatch does not currently provide distributed/multi-machine session aggregation.
+
+---
 
 ## Roadmap
 
-1. Filesystem + Git monitoring ✅
-2. Session metadata + append-only event log ✅
-3. Command/test tracking ✅
-4. Git line-delta summary ✅
-5. Event IDs ✅
-6. Configurable risk policies ✅
-7. Codex provider integration ✅
-8. Provider lifecycle events and richer agent metadata ✅
-9. Read-only live TUI ✅
-10. Provider stdout/stderr capture ✅
-11. Interactive TUI navigation, run filtering, and scrolling ✅
-12. Run-scoped net file attribution ✅
-13. Optional safe control actions
+Completed foundations:
+
+- [x] Filesystem and Git monitoring
+- [x] Persistent session engine
+- [x] Append-only event log
+- [x] Command and test tracking
+- [x] Git line-delta summaries
+- [x] Event IDs
+- [x] Configurable path and command policies
+- [x] Codex provider integration
+- [x] Provider lifecycle events and richer metadata
+- [x] Live Ratatui dashboard
+- [x] Provider stdout/stderr capture
+- [x] Interactive TUI navigation, filtering, and scrolling
+- [x] Selected-run details panel
+- [x] Run-scoped net file attribution
+
+Next directions:
+
+- [ ] optional safe process controls
+- [ ] kill/retry actions with explicit safety boundaries
+- [ ] richer per-run test and command correlation
+- [ ] output retention limits and redaction controls
+- [ ] additional provider adapters
+- [ ] stronger concurrent file attribution
+- [ ] richer session export/reporting
+
+---
+
+## Philosophy
+
+AI coding agents are increasingly capable of changing large parts of a repository autonomously. The more autonomy they receive, the more useful it becomes to have an independent layer that observes their work, records what happened, and applies project-level safety policy.
+
+AgentWatch is intended to become that layer:
+
+```text
+coding agent
+     │
+     ▼
+AgentWatch
+     │
+     ├── observability
+     ├── attribution
+     ├── policy
+     ├── history
+     └── operator interface
+     │
+     ▼
+ repository
+```
+
+The agent does the work. AgentWatch makes the work visible.
