@@ -3,7 +3,7 @@ use std::{path::Path, sync::mpsc};
 use anyhow::{Context, Result};
 use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::{risk, session};
+use crate::{policy::{self, Decision}, session};
 
 pub fn watch(path: &Path) -> Result<()> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
@@ -24,19 +24,37 @@ pub fn watch(path: &Path) -> Result<()> {
                 let kind = format!("{:?}", event.kind);
 
                 for changed in event.paths {
-                    if ignored(&changed) {
+                    let evaluation = match policy::evaluate_path(path, &changed) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            eprintln!("policy error for {}: {error}", changed.display());
+                            continue;
+                        }
+                    };
+
+                    if evaluation.matched_rule.as_deref().is_some_and(|rule| rule.starts_with("ignore:")) {
                         continue;
                     }
 
-                    if let Err(error) = session::record_file(path, kind.clone(), &changed) {
+                    if let Err(error) = session::record(path, kind.clone(), &changed) {
                         eprintln!("session record error: {error}");
                     }
 
-                    let risk = risk::reason(&changed)
-                        .map(|reason| format!(" [risk: {reason}]"))
-                        .unwrap_or_default();
-
-                    println!("{} {}{}", kind, changed.display(), risk);
+                    match evaluation.decision {
+                        Decision::Allow => println!("{} {}", kind, changed.display()),
+                        Decision::Warn => println!(
+                            "{} {} [warn: {}]",
+                            kind,
+                            changed.display(),
+                            evaluation.matched_rule.as_deref().unwrap_or("policy")
+                        ),
+                        Decision::Deny => println!(
+                            "{} {} [deny: {}]",
+                            kind,
+                            changed.display(),
+                            evaluation.matched_rule.as_deref().unwrap_or("policy")
+                        ),
+                    }
                 }
             }
             Err(error) => eprintln!("watch error: {error}"),
@@ -44,13 +62,4 @@ pub fn watch(path: &Path) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn ignored(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(
-            component.as_os_str().to_str(),
-            Some(".git" | ".agentwatch" | "target" | "node_modules" | ".next")
-        )
-    })
 }
