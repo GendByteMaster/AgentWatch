@@ -886,17 +886,21 @@ fn codex_threads(frame: &mut Frame, area: Rect, data: &Data) {
         title.push_str(&format!(" — {}", short(error, 48)));
     }
 
-    let header = Row::new(["Status", "Thread", "Latest Turn", "Recent Activity", "Updated"])
-        .style(Style::default().add_modifier(Modifier::BOLD));
+    let header = Row::new([
+        "Status",
+        "Thread",
+        "Latest Turn",
+        "Recent Activity",
+        "Updated",
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD));
     let visible = area.height.saturating_sub(3) as usize;
     let rows = snapshot.threads.iter().take(visible).map(|thread| {
         let label = thread
             .name
             .as_deref()
             .filter(|value| !value.trim().is_empty())
-            .or_else(|| {
-                (!thread.preview.trim().is_empty()).then_some(thread.preview.as_str())
-            })
+            .or_else(|| (!thread.preview.trim().is_empty()).then_some(thread.preview.as_str()))
             .unwrap_or(thread.id.as_str());
         let thread_label = format!("{} [{}]", short(label, 24), short(&thread.source, 10));
         let latest_turn = thread
@@ -946,14 +950,7 @@ fn companion_activity(thread: &companion::CompanionThread) -> String {
         .recent_items
         .iter()
         .take(3)
-        .map(|item| {
-            format!(
-                "{}:{} {}",
-                item.kind,
-                item.status,
-                short(&item.detail, 28)
-            )
-        })
+        .map(|item| format!("{}:{} {}", item.kind, item.status, short(&item.detail, 28)))
         .collect::<Vec<_>>()
         .join(" | ")
 }
