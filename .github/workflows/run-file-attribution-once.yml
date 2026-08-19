@@ -21,153 +21,35 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Patch, validate, and report
-        shell: bash
+      - name: Patch TUI and README
+        run: python .github/patch_run_attribution.py
+
+      - name: Format
+        run: cargo fmt --all
+
+      - name: Apply Clippy fixes
+        run: cargo clippy --fix --all-targets --all-features --allow-dirty --allow-staged -- -D warnings
+
+      - name: Format after fixes
+        run: cargo fmt --all
+
+      - name: Check
+        run: cargo check --all-targets --all-features
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets --all-features
+
+      - name: Commit validated changes
         run: |
-          set +e
-          LOG=/tmp/run-attribution.log
-          : > "$LOG"
-
-          python - <<'PY' >> "$LOG" 2>&1
-          from pathlib import Path
-
-          dashboard = Path("src/dashboard.rs")
-          text = dashboard.read_text()
-          text = text.replace(
-              "    collections::{BTreeMap, BTreeSet},\n",
-              "    collections::BTreeMap,\n",
-              1,
-          )
-
-          if "Files attributed to run" not in text:
-              details = text.index("fn run_details(")
-              files_start = text.index("    let end = run.ended_at", details)
-              status_start = text.index("    let (status, status_style)", files_start)
-              attributed = '''    let attributed_files = data
-                  .events
-                  .iter()
-                  .filter(|event| event.run_id.as_deref() == Some(run.id.as_str()))
-                  .filter(|event| event.kind.starts_with("agent.file."))
-                  .filter_map(|event| {
-                      event.path.as_ref().map(|path| {
-                          (
-                              event.kind.strip_prefix("agent.file.").unwrap_or("modified"),
-                              path,
-                          )
-                      })
-                  })
-                  .collect::<Vec<_>>();
-              '''
-              text = text[:files_start] + attributed + text[status_start:]
-              text = text.replace(
-                  '            "Observed files (time window)",',
-                  '            "Files attributed to run",',
-                  1,
-              )
-
-              details = text.index("fn run_details(")
-              loop_start = text.index("    let file_limit =", details)
-              render_start = text.index("    frame.render_widget(", loop_start)
-              file_block = '''    let file_limit = area.height.saturating_sub(15) as usize;
-                  if attributed_files.is_empty() {
-                      lines.push(Line::styled(
-                          "  no net file changes recorded",
-                          Style::default().fg(Color::DarkGray),
-                      ));
-                  } else {
-                      for (change, path) in attributed_files.iter().take(file_limit) {
-                          lines.push(Line::raw(format!("  {change:<8} {}", path.display())));
-                      }
-                      if attributed_files.len() > file_limit {
-                          lines.push(Line::styled(
-                              format!("  +{} more", attributed_files.len() - file_limit),
-                              Style::default().fg(Color::DarkGray),
-                          ));
-                      }
-                  }
-
-              '''
-              text = text[:loop_start] + file_block + text[render_start:]
-          dashboard.write_text(text)
-
-          readme = Path("README.md")
-          text = readme.read_text()
-          if "## Quick start" not in text:
-              quick = '''## Quick start
-
-Prerequisites: Rust toolchain and the Codex CLI available in `PATH`.
-
-```bash
-git clone https://github.com/GendByteMaster/AgentWatch.git
-cd AgentWatch
-cargo install --path .
-agentwatch start
-```
-
-Then use two terminals in the same project:
-
-```bash
-# terminal 1
-agentwatch tui
-
-# terminal 2
-agentwatch codex -- "Fix the failing tests"
-```
-
-That is enough for lifecycle events, live stdout/stderr, policy checks, and run-scoped net file attribution. `agentwatch watch` is optional and adds ambient realtime filesystem events from all writers.
-
-'''
-              text = text.replace("## Commands\n", quick + "## Commands\n", 1)
-
-          text = text.replace(
-              "The `Run Details` panel follows the selected run. File attribution is currently time-window based (`agent.started` through its terminal event), so it is labeled as observed rather than exact when multiple writers are active.",
-              "The `Run Details` panel follows the selected run. AgentWatch snapshots Git worktree state before and after an AgentWatch-controlled provider run and emits `agent.file.created`, `agent.file.modified`, or `agent.file.deleted` events carrying that run's `run_id`. This gives deterministic net-change attribution for an isolated run. If multiple processes modify the same worktree concurrently, overlapping changes cannot be perfectly disambiguated without OS-level process tracing.",
-              1,
-          )
-          text = text.replace(
-              "11. Optional safe control actions",
-              "11. Run-scoped net file attribution ✅\n12. Optional safe control actions",
-              1,
-          )
-          readme.write_text(text)
-          PY
-          PATCH=$?
-
-          STATUS=$PATCH
-          if [ "$STATUS" -eq 0 ]; then
-            echo '=== cargo fmt ===' >> "$LOG"
-            cargo fmt --all >> "$LOG" 2>&1
-            STATUS=$?
-          fi
-          if [ "$STATUS" -eq 0 ]; then
-            echo '=== cargo check ===' >> "$LOG"
-            cargo check --all-targets --all-features >> "$LOG" 2>&1
-            STATUS=$?
-          fi
-          if [ "$STATUS" -eq 0 ]; then
-            echo '=== cargo clippy ===' >> "$LOG"
-            cargo clippy --all-targets --all-features -- -D warnings >> "$LOG" 2>&1
-            STATUS=$?
-          fi
-          if [ "$STATUS" -eq 0 ]; then
-            echo '=== cargo test ===' >> "$LOG"
-            cargo test --all-targets --all-features >> "$LOG" 2>&1
-            STATUS=$?
-          fi
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ "$STATUS" -ne 0 ]; then
-            cp "$LOG" .github/run-attribution-debug.txt
-            git add .github/run-attribution-debug.txt
-            git commit -m "ci: capture run attribution failure"
-            git push
-            exit "$STATUS"
-          fi
-
           git add src README.md
-          if ! git diff --cached --quiet; then
-            git commit -m "feat: finish run-scoped file attribution"
-            git push
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
           fi
+          git commit -m "feat: finish run-scoped file attribution"
+          git push
