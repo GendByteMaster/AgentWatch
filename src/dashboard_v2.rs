@@ -319,17 +319,13 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
                 }
                 refreshed = Instant::now();
             }
-            KeyCode::Up | KeyCode::Char('k') if ui.page == Page::Runs => {
-                ui.select_previous_run()
-            }
+            KeyCode::Up | KeyCode::Char('k') if ui.page == Page::Runs => ui.select_previous_run(),
             KeyCode::Down | KeyCode::Char('j') if ui.page == Page::Runs => {
                 ui.select_next_run(&data)
             }
             KeyCode::PageUp if ui.page == Page::Runs => ui.page_up_runs(),
             KeyCode::PageDown if ui.page == Page::Runs => ui.page_down_runs(&data),
-            KeyCode::Char('a') if ui.page == Page::Runs => {
-                ui.show_all_output = !ui.show_all_output
-            }
+            KeyCode::Char('a') if ui.page == Page::Runs => ui.show_all_output = !ui.show_all_output,
             KeyCode::Char('d') if ui.page == Page::Runs => ui.open_diff(root, &data),
             _ => {}
         }
@@ -1313,7 +1309,10 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     );
 }
 
-fn append_companion_details(lines: &mut Vec<Line<'static>>, telemetry: &companion::CompanionTelemetry) {
+fn append_companion_details(
+    lines: &mut Vec<Line<'static>>,
+    telemetry: &companion::CompanionTelemetry,
+) {
     lines.push(Line::raw(""));
     lines.push(Line::styled(
         "Context / Efficiency",
