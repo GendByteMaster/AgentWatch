@@ -121,3 +121,47 @@ jobs:
               --notes-file RELEASE_NOTES.md \
               --latest
           fi
+
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = "false"
+          test "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq '.isPrerelease')" = "false"
+          asset_names=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          grep -Fx "agentwatch-v${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" <<<"$asset_names"
+          grep -Fx "agentwatch-v${RELEASE_VERSION}-x86_64-pc-windows-msvc.zip" <<<"$asset_names"
+          grep -Fx "SHA256SUMS" <<<"$asset_names"
+
+      - name: Record release receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag_sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" --jq '.object.sha')
+          release_url=$(gh release view "$RELEASE_TAG" --json url --jq '.url')
+          published_at=$(gh release view "$RELEASE_TAG" --json publishedAt --jq '.publishedAt')
+          asset_names=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+
+          mkdir -p .github/release-receipts
+          {
+            echo "tag=${RELEASE_TAG}"
+            echo "tag_sha=${tag_sha}"
+            echo "release_url=${release_url}"
+            echo "published_at=${published_at}"
+            echo
+            echo "assets:"
+            printf '%s\n' "$asset_names"
+            echo
+            echo "checksums:"
+            cat dist/SHA256SUMS
+          } > ".github/release-receipts/${RELEASE_TAG}.txt"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ".github/release-receipts/${RELEASE_TAG}.txt"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): record ${RELEASE_TAG} publication"
+            git push origin HEAD:master
+          fi
