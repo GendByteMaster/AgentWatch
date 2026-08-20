@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "windows")]
 use serde_json::Value;
@@ -7,12 +10,16 @@ use std::fs;
 #[cfg(target_os = "windows")]
 use std::process::Command;
 
+const HISTORY_LIMIT: usize = 60;
+
 #[derive(Debug, Clone, Default)]
 pub struct SystemSnapshot {
     pub platform: String,
     pub cpu_percent: Option<f32>,
     pub memory_used_bytes: Option<u64>,
     pub memory_total_bytes: Option<u64>,
+    pub cpu_history: Vec<u64>,
+    pub memory_history: Vec<u64>,
     pub processes: Vec<ProcessSnapshot>,
     pub error: Option<String>,
 }
@@ -28,6 +35,8 @@ pub struct ProcessSnapshot {
 pub struct SystemMonitor {
     snapshot: SystemSnapshot,
     last_refresh: Option<Instant>,
+    cpu_history: VecDeque<u64>,
+    memory_history: VecDeque<u64>,
     #[cfg(target_os = "linux")]
     previous_cpu: Option<CpuSample>,
 }
@@ -53,6 +62,8 @@ impl SystemMonitor {
                 ..Default::default()
             },
             last_refresh: None,
+            cpu_history: VecDeque::with_capacity(HISTORY_LIMIT),
+            memory_history: VecDeque::with_capacity(HISTORY_LIMIT),
             #[cfg(target_os = "linux")]
             previous_cpu: None,
         }
@@ -73,7 +84,7 @@ impl SystemMonitor {
 
     pub fn refresh(&mut self) {
         self.last_refresh = Some(Instant::now());
-        self.snapshot = match collect_snapshot(self) {
+        let mut snapshot = match collect_snapshot(self) {
             Ok(snapshot) => snapshot,
             Err(error) => SystemSnapshot {
                 platform: std::env::consts::OS.to_owned(),
@@ -81,7 +92,37 @@ impl SystemMonitor {
                 ..Default::default()
             },
         };
+
+        if let Some(cpu_percent) = snapshot.cpu_percent {
+            push_sample(
+                &mut self.cpu_history,
+                cpu_percent.round().clamp(0.0, 100.0) as u64,
+            );
+        }
+        if let Some(memory_percent) = memory_percent(&snapshot) {
+            push_sample(&mut self.memory_history, memory_percent);
+        }
+
+        snapshot.cpu_history = self.cpu_history.iter().copied().collect();
+        snapshot.memory_history = self.memory_history.iter().copied().collect();
+        self.snapshot = snapshot;
     }
+}
+
+fn push_sample(history: &mut VecDeque<u64>, value: u64) {
+    if history.len() == HISTORY_LIMIT {
+        history.pop_front();
+    }
+    history.push_back(value.min(100));
+}
+
+fn memory_percent(snapshot: &SystemSnapshot) -> Option<u64> {
+    let used = u128::from(snapshot.memory_used_bytes?);
+    let total = u128::from(snapshot.memory_total_bytes?);
+    if total == 0 {
+        return None;
+    }
+    u64::try_from(used.saturating_mul(100) / total).ok()
 }
 
 #[cfg(target_os = "windows")]
@@ -151,7 +192,7 @@ $processes = @(
             .map(|(total, free)| total.saturating_sub(free)),
         memory_total_bytes: total,
         processes,
-        error: None,
+        ..Default::default()
     })
 }
 
@@ -199,7 +240,7 @@ fn collect_snapshot(monitor: &mut SystemMonitor) -> Result<SystemSnapshot, Strin
         memory_used_bytes: Some(memory_used_bytes),
         memory_total_bytes: Some(memory_total_bytes),
         processes: read_linux_processes(),
-        error: None,
+        ..Default::default()
     })
 }
 
@@ -301,8 +342,31 @@ fn collect_snapshot(_monitor: &mut SystemMonitor) -> Result<SystemSnapshot, Stri
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     #[cfg(target_os = "linux")]
     use super::parse_kib;
+    use super::{HISTORY_LIMIT, SystemSnapshot, memory_percent, push_sample};
+
+    #[test]
+    fn caps_resource_history() {
+        let mut history = VecDeque::new();
+        for value in 0..(HISTORY_LIMIT + 5) {
+            push_sample(&mut history, value as u64);
+        }
+        assert_eq!(history.len(), HISTORY_LIMIT);
+        assert_eq!(history.front().copied(), Some(5));
+    }
+
+    #[test]
+    fn computes_memory_percent() {
+        let snapshot = SystemSnapshot {
+            memory_used_bytes: Some(8),
+            memory_total_bytes: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(memory_percent(&snapshot), Some(80));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
