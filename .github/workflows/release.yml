@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_VERSION: 0.1.0
+  RELEASE_TAG: v0.1.0
+
+jobs:
+  build:
+    name: Build release (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: windows-latest
+            artifact: windows-x86_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Validate package version
+        shell: bash
+        run: |
+          package_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          test "$package_version" = "$RELEASE_VERSION"
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf "dist/agentwatch-v${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" agentwatch
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive `
+            -Path target\release\agentwatch.exe `
+            -DestinationPath "dist\agentwatch-v${env:RELEASE_VERSION}-x86_64-pc-windows-msvc.zip" `
+            -Force
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: '*-x86_64'
+          merge-multiple: true
+
+      - name: Validate release metadata
+        shell: bash
+        run: |
+          package_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          test "$package_version" = "$RELEASE_VERSION"
+          test "$RELEASE_TAG" = "v$package_version"
+          test -f RELEASE_NOTES.md
+
+      - name: Generate SHA-256 checksums
+        shell: bash
+        run: |
+          cd dist
+          sha256sum agentwatch-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create or refresh release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --title "AgentWatch $RELEASE_TAG — First Public Release" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
+            gh release upload "$RELEASE_TAG" dist/* --clobber
+          else
+            gh release create "$RELEASE_TAG" dist/* \
+              --target "$GITHUB_SHA" \
+              --title "AgentWatch $RELEASE_TAG — First Public Release" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
+          fi
