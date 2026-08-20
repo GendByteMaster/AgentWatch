@@ -1,9 +1,10 @@
-use std::{
-    fs,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(target_os = "windows")]
+use std::process::Command;
+#[cfg(target_os = "windows")]
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
@@ -120,8 +121,14 @@ $processes = @(
 
     let value: Value = serde_json::from_slice(&output.stdout)
         .map_err(|error| format!("failed to parse PowerShell monitor JSON: {error}"))?;
-    let total = value.get("memory_total").and_then(Value::as_f64).map(|v| v as u64);
-    let free = value.get("memory_free").and_then(Value::as_f64).map(|v| v as u64);
+    let total = value
+        .get("memory_total")
+        .and_then(Value::as_f64)
+        .map(|value| value as u64);
+    let free = value
+        .get("memory_free")
+        .and_then(Value::as_f64)
+        .map(|value| value as u64);
     let processes = value
         .get("processes")
         .map(parse_windows_processes)
@@ -129,8 +136,13 @@ $processes = @(
 
     Ok(SystemSnapshot {
         platform: "windows".to_owned(),
-        cpu_percent: value.get("cpu").and_then(Value::as_f64).map(|v| v as f32),
-        memory_used_bytes: total.zip(free).map(|(total, free)| total.saturating_sub(free)),
+        cpu_percent: value
+            .get("cpu")
+            .and_then(Value::as_f64)
+            .map(|value| value as f32),
+        memory_used_bytes: total
+            .zip(free)
+            .map(|(total, free)| total.saturating_sub(free)),
         memory_total_bytes: total,
         processes,
         error: None,
@@ -150,7 +162,10 @@ fn parse_windows_processes(value: &Value) -> Vec<ProcessSnapshot> {
             Some(ProcessSnapshot {
                 pid: u32::try_from(value.get("pid")?.as_u64()?).ok()?,
                 name: value.get("name")?.as_str()?.to_owned(),
-                memory_bytes: value.get("memory").and_then(Value::as_f64).map(|v| v as u64),
+                memory_bytes: value
+                    .get("memory")
+                    .and_then(Value::as_f64)
+                    .map(|value| value as u64),
                 cpu_seconds: value.get("cpu_seconds").and_then(Value::as_f64),
             })
         })
