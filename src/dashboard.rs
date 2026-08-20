@@ -1131,9 +1131,9 @@ fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         let right = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Percentage(24),
-                Constraint::Percentage(34),
+                Constraint::Percentage(20),
                 Constraint::Percentage(42),
+                Constraint::Percentage(38),
             ])
             .split(columns[1]);
         files(frame, right[0], data);
@@ -1175,16 +1175,71 @@ fn context_efficiency(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) 
         .map(unix_clock)
         .unwrap_or_else(|| "-".to_owned());
 
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Observed health: "),
-            Span::styled(
-                health,
-                Style::default()
-                    .fg(health_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+    let mut lines = vec![Line::from(vec![
+        Span::raw("Observed health: "),
+        Span::styled(
+            health,
+            Style::default()
+                .fg(health_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    if let Some(usage) = telemetry.token_usage.as_ref() {
+        let pressure = context_pressure_percent(usage);
+        let pressure_color = context_pressure_color(pressure);
+        let pressure_label = pressure
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "unknown".to_owned());
+        let window = usage
+            .model_context_window
+            .map(format_token_count)
+            .unwrap_or_else(|| "unknown".to_owned());
+        let cache_hit = token_percent(usage.last.cached_input_tokens, usage.last.input_tokens);
+        let reasoning_share =
+            token_percent(usage.last.reasoning_output_tokens, usage.last.output_tokens);
+
+        lines.extend([
+            Line::from(vec![
+                Span::raw("Context pressure: "),
+                Span::styled(
+                    pressure_label,
+                    Style::default()
+                        .fg(pressure_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(
+                    "   {} / {}",
+                    format_token_count(usage.last.input_tokens),
+                    window
+                )),
+            ]),
+            Line::raw(format!(
+                "Last input: {}   cached: {} ({}%)",
+                format_token_count(usage.last.input_tokens),
+                format_token_count(usage.last.cached_input_tokens),
+                cache_hit
+            )),
+            Line::raw(format!(
+                "Last output: {}   reasoning: {} ({}%)",
+                format_token_count(usage.last.output_tokens),
+                format_token_count(usage.last.reasoning_output_tokens),
+                reasoning_share
+            )),
+            Line::raw(format!(
+                "Thread total: {}   cache writes: {}",
+                format_token_count(usage.total.total_tokens),
+                format_token_count(usage.total.cache_write_input_tokens)
+            )),
+        ]);
+    } else {
+        lines.push(Line::styled(
+            "Context pressure: unavailable — no persisted token_count yet",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    lines.extend([
         Line::raw(format!(
             "Tools: {}   Failed: {} ({}%)   Repeated: {} ({}%)",
             telemetry.tool_calls,
@@ -1194,23 +1249,17 @@ fn context_efficiency(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) 
             repeat_percent
         )),
         Line::raw(format!(
-            "Compactions: {}   Last: {}",
-            telemetry.compactions, last_compaction
-        )),
-        Line::raw(format!("Subagents: {}", telemetry.subagent_calls)),
-        Line::raw(format!(
-            "Shell: {}   Files: {}",
-            telemetry.shell_calls, telemetry.file_changes
+            "Compactions: {}   Last: {}   Subagents: {}",
+            telemetry.compactions, last_compaction, telemetry.subagent_calls
         )),
         Line::raw(format!(
-            "MCP: {}   Web: {}",
-            telemetry.mcp_calls, telemetry.web_searches
+            "Shell: {}   Files: {}   MCP: {}   Web: {}",
+            telemetry.shell_calls,
+            telemetry.file_changes,
+            telemetry.mcp_calls,
+            telemetry.web_searches
         )),
-        Line::styled(
-            "Token context: pending safe live-usage source",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ];
+    ]);
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -1227,6 +1276,44 @@ fn context_efficiency(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) 
 
 fn integer_percent(part: usize, total: usize) -> usize {
     part.saturating_mul(100).checked_div(total).unwrap_or(0)
+}
+
+fn token_percent(part: i64, total: i64) -> usize {
+    let Ok(part) = usize::try_from(part) else {
+        return 0;
+    };
+    let Ok(total) = usize::try_from(total) else {
+        return 0;
+    };
+    integer_percent(part, total)
+}
+
+fn context_pressure_percent(usage: &companion::CompanionTokenUsage) -> Option<usize> {
+    let window = usage.model_context_window?;
+    if window <= 0 {
+        return None;
+    }
+    Some(token_percent(usage.last.input_tokens, window))
+}
+
+fn context_pressure_color(pressure: Option<usize>) -> Color {
+    match pressure {
+        Some(value) if value >= 85 => Color::Red,
+        Some(value) if value >= 70 => Color::Yellow,
+        Some(_) => Color::Green,
+        None => Color::DarkGray,
+    }
+}
+
+fn format_token_count(value: i64) -> String {
+    let value = value.max(0);
+    if value >= 1_000_000 {
+        format!("{:.2}M", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}K", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
 }
 
 fn telemetry_health(telemetry: &companion::CompanionTelemetry) -> (&'static str, Color) {
@@ -1893,7 +1980,11 @@ fn bytes(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RunStatus, companion_run_status, unix_datetime};
+    use super::{
+        RunStatus, companion_run_status, context_pressure_percent, format_token_count,
+        unix_datetime,
+    };
+    use crate::companion::{CompanionTokenUsage, CompanionTokenUsageBreakdown};
 
     #[test]
     fn maps_companion_turn_statuses() {
@@ -1917,5 +2008,26 @@ mod tests {
         assert!(unix_datetime(0).is_none());
         assert!(unix_datetime(-1).is_none());
         assert!(unix_datetime(1).is_some());
+    }
+
+    #[test]
+    fn computes_context_pressure_from_last_input() {
+        let usage = CompanionTokenUsage {
+            total: CompanionTokenUsageBreakdown::default(),
+            last: CompanionTokenUsageBreakdown {
+                input_tokens: 640_000,
+                ..Default::default()
+            },
+            model_context_window: Some(1_000_000),
+            observed_at: None,
+        };
+        assert_eq!(context_pressure_percent(&usage), Some(64));
+    }
+
+    #[test]
+    fn formats_large_token_counts_compactly() {
+        assert_eq!(format_token_count(900), "900");
+        assert_eq!(format_token_count(12_300), "12.3K");
+        assert_eq!(format_token_count(1_250_000), "1.25M");
     }
 }
