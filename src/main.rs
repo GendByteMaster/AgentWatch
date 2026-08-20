@@ -7,6 +7,7 @@ mod codex_locator;
 mod companion;
 mod dashboard;
 mod dashboard_v2;
+mod dashboard_v3;
 mod git;
 mod output;
 mod policy;
@@ -44,12 +45,18 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Open the AgentWatch terminal dashboard v2.
+    /// Open the current AgentWatch terminal dashboard.
     Tui {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Open the previous AgentWatch terminal dashboard during the v2 transition.
+    /// Open the previous AgentWatch terminal dashboard v2.
+    #[command(name = "tui-v2")]
+    TuiV2 {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Open the classic AgentWatch terminal dashboard.
     #[command(name = "tui-classic")]
     TuiClassic {
         #[arg(default_value = ".")]
@@ -143,7 +150,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Watch { path } => watcher::watch(&path),
-        Command::Tui { path } => dashboard_v2::run(&path),
+        Command::Tui { path } => dashboard_v3::run(&path),
+        Command::TuiV2 { path } => dashboard_v2::run(&path),
         Command::TuiClassic { path } => dashboard::run(&path),
         Command::Status { path } => git::status(&path),
         Command::Diff { path } => git::diff(&path),
