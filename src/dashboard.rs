@@ -221,8 +221,7 @@ impl UiState {
                 run_id: run.id.clone(),
                 diff: None,
                 message: Some(
-                    "Run Diff is not persisted for read-only Codex Companion turns yet."
-                        .to_owned(),
+                    "Run Diff is not persisted for read-only Codex Companion turns yet.".to_owned(),
                 ),
             });
             self.diff_scroll = 0;
