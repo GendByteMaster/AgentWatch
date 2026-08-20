@@ -6,6 +6,7 @@ mod attribution;
 mod codex_locator;
 mod companion;
 mod dashboard;
+mod dashboard_v2;
 mod git;
 mod output;
 mod policy;
@@ -15,6 +16,7 @@ mod risk;
 mod run_diff;
 mod runner;
 mod session;
+mod system_monitor;
 mod watcher;
 
 use std::path::PathBuf;
@@ -42,8 +44,14 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
-    /// Open the live read-only AgentWatch terminal dashboard.
+    /// Open the AgentWatch terminal dashboard v2.
     Tui {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+    /// Open the previous AgentWatch terminal dashboard during the v2 transition.
+    #[command(name = "tui-classic")]
+    TuiClassic {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
@@ -135,7 +143,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Watch { path } => watcher::watch(&path),
-        Command::Tui { path } => dashboard::run(&path),
+        Command::Tui { path } => dashboard_v2::run(&path),
+        Command::TuiClassic { path } => dashboard::run(&path),
         Command::Status { path } => git::status(&path),
         Command::Diff { path } => git::diff(&path),
         Command::Start { path } => session::start(&path),
