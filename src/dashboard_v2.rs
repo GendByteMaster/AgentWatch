@@ -1072,7 +1072,10 @@ fn resource_sparkline(
         .map(|value| format!("{value}%"))
         .unwrap_or_else(|| "collecting".to_owned());
     let peak = history.iter().copied().max().unwrap_or_default();
-    let title = format!("{title} · now {current} · peak {peak}% · last {} samples", history.len());
+    let title = format!(
+        "{title} · now {current} · peak {peak}% · last {} samples",
+        history.len()
+    );
 
     if history.is_empty() {
         frame.render_widget(
@@ -1192,10 +1195,7 @@ fn monitoring_alerts(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
     let alerts = collect_monitoring_alerts(data, monitor);
     let lines = if alerts.is_empty() {
         vec![Line::from(vec![
-            Span::styled(
-                " OK ",
-                Style::default().bg(Color::Green).fg(Color::Black),
-            ),
+            Span::styled(" OK ", Style::default().bg(Color::Green).fg(Color::Black)),
             Span::styled(
                 " No active monitoring alerts",
                 Style::default().fg(Color::Green),
@@ -1276,11 +1276,7 @@ fn collect_monitoring_alerts(
     }
 
     if let Some(error) = &monitor.error {
-        alerts.push((
-            Color::Yellow,
-            "Sampler".to_owned(),
-            short(error, 54),
-        ));
+        alerts.push((Color::Yellow, "Sampler".to_owned(), short(error, 54)));
     }
 
     if !data
@@ -1403,14 +1399,10 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
                 .map(|usage| token_percent(usage.last.cached_input_tokens, usage.last.input_tokens))
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "-".to_owned());
-            let failed = integer_percent(
-                thread.telemetry.failed_items,
-                thread.telemetry.total_items,
-            );
-            let repeated = integer_percent(
-                thread.telemetry.repeated_items,
-                thread.telemetry.tool_calls,
-            );
+            let failed =
+                integer_percent(thread.telemetry.failed_items, thread.telemetry.total_items);
+            let repeated =
+                integer_percent(thread.telemetry.repeated_items, thread.telemetry.tool_calls);
             Row::new([
                 Cell::from(short(thread_label(thread), 28)),
                 pressure_cell,
@@ -1811,13 +1803,18 @@ fn token_thread_count(data: &Data) -> usize {
 }
 
 fn max_context_pressure(data: &Data) -> Option<usize> {
-    data.companion.as_ref()?.threads.iter().filter_map(|thread| {
-        thread
-            .telemetry
-            .token_usage
-            .as_ref()
-            .and_then(context_pressure_percent)
-    }).max()
+    data.companion
+        .as_ref()?
+        .threads
+        .iter()
+        .filter_map(|thread| {
+            thread
+                .telemetry
+                .token_usage
+                .as_ref()
+                .and_then(context_pressure_percent)
+        })
+        .max()
 }
 
 fn thread_label(thread: &companion::CompanionThread) -> &str {
