@@ -302,8 +302,9 @@ fn poll(
                     if let Some(thread) = read.get("thread") {
                         let mut observation = parse_thread(thread)?;
                         if observation.token_usage.is_none() {
-                            observation.token_usage =
-                                known.get(id).and_then(|previous| previous.token_usage.clone());
+                            observation.token_usage = known
+                                .get(id)
+                                .and_then(|previous| previous.token_usage.clone());
                         }
                         observations.push(observation);
                         continue;
@@ -617,18 +618,12 @@ fn parse_persisted_token_usage(value: &Value) -> Option<CompanionTokenUsage> {
         return None;
     }
 
-    let total = parse_token_usage_breakdown(value_alias(
-        info,
-        "total_token_usage",
-        "totalTokenUsage",
-    )?)?;
-    let last = parse_token_usage_breakdown(value_alias(
-        info,
-        "last_token_usage",
-        "lastTokenUsage",
-    )?)?;
-    let model_context_window = value_alias(info, "model_context_window", "modelContextWindow")
-        .and_then(Value::as_i64);
+    let total =
+        parse_token_usage_breakdown(value_alias(info, "total_token_usage", "totalTokenUsage")?)?;
+    let last =
+        parse_token_usage_breakdown(value_alias(info, "last_token_usage", "lastTokenUsage")?)?;
+    let model_context_window =
+        value_alias(info, "model_context_window", "modelContextWindow").and_then(Value::as_i64);
     let observed_at = value
         .get("timestamp")
         .and_then(Value::as_str)
