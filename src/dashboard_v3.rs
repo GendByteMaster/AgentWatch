@@ -1,5 +1,4 @@
 use std::{
-    cmp::Ordering,
     collections::BTreeMap,
     fs,
     io::{BufRead, BufReader},
@@ -129,7 +128,9 @@ impl UiState {
 
     fn page_up(&mut self, data: &Data) {
         match self.page {
-            Page::Monitoring => self.selected_thread = self.selected_thread.saturating_sub(PAGE_STEP),
+            Page::Monitoring => {
+                self.selected_thread = self.selected_thread.saturating_sub(PAGE_STEP)
+            }
             Page::Runs => self.selected_run = self.selected_run.saturating_sub(PAGE_STEP),
             Page::Overview => {}
         }
@@ -138,7 +139,9 @@ impl UiState {
 
     fn page_down(&mut self, data: &Data) {
         match self.page {
-            Page::Monitoring => self.selected_thread = self.selected_thread.saturating_add(PAGE_STEP),
+            Page::Monitoring => {
+                self.selected_thread = self.selected_thread.saturating_add(PAGE_STEP)
+            }
             Page::Runs => self.selected_run = self.selected_run.saturating_add(PAGE_STEP),
             Page::Overview => {}
         }
@@ -401,7 +404,10 @@ fn read_events(root: &Path) -> Result<Vec<SessionEvent>> {
 
 fn aggregate_runs(events: &[SessionEvent], companion: Option<&CompanionSnapshot>) -> Vec<AgentRun> {
     let mut runs = BTreeMap::<String, AgentRun>::new();
-    for event in events.iter().filter(|event| event.kind.starts_with("agent")) {
+    for event in events
+        .iter()
+        .filter(|event| event.kind.starts_with("agent"))
+    {
         let Some(id) = event.run_id.clone() else {
             continue;
         };
@@ -750,7 +756,11 @@ fn overview_cards(frame: &mut Frame, area: Rect, data: &Data) {
         "Agent runs",
         &data.runs.len().to_string(),
         &format!("{running} running · {failed} failed"),
-        if failed == 0 { Color::Green } else { Color::Yellow },
+        if failed == 0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        },
     );
     metric_card(
         frame,
@@ -758,7 +768,11 @@ fn overview_cards(frame: &mut Frame, area: Rect, data: &Data) {
         "Codex companion",
         codex_state,
         &format!("{token_threads} threads with tokens"),
-        if codex_state == "connected" { Color::Green } else { Color::Yellow },
+        if codex_state == "connected" {
+            Color::Green
+        } else {
+            Color::Yellow
+        },
     );
 }
 
@@ -853,7 +867,11 @@ fn recent_events(frame: &mut Frame, area: Rect, data: &Data) {
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Activity timeline").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Activity timeline")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -864,7 +882,11 @@ fn codex_activity(frame: &mut Frame, area: Rect, data: &Data) {
         frame.render_widget(
             Paragraph::new("No companion snapshot. Start `agentwatch codex-watch`.")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().title("Codex activity").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title("Codex activity")
+                        .borders(Borders::ALL),
+                ),
             area,
         );
         return;
@@ -878,7 +900,7 @@ fn codex_activity(frame: &mut Frame, area: Rect, data: &Data) {
             Row::new([
                 thread.status.clone(),
                 short(thread_label(thread), 34),
-                thread_pressure(*thread)
+                thread_pressure(thread)
                     .map(|value| format!("{value}%"))
                     .unwrap_or_else(|| "-".to_owned()),
                 thread.telemetry.tool_calls.to_string(),
@@ -913,14 +935,21 @@ fn changed_files(frame: &mut Frame, area: Rect, data: &Data) {
         .take(area.height.saturating_sub(2) as usize)
         .map(|(status, path)| {
             Line::from(vec![
-                Span::styled(format!("{status:>2} "), Style::default().fg(file_status_color(status))),
+                Span::styled(
+                    format!("{status:>2} "),
+                    Style::default().fg(file_status_color(status)),
+                ),
                 Span::raw(path.clone()),
             ])
         })
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Changed files").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Changed files")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -1023,8 +1052,16 @@ fn monitoring_summary(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syst
         areas[3],
         "Monitoring · Alerts",
         &alert_count.to_string(),
-        if alert_count == 0 { "all clear" } else { "needs attention" },
-        if alert_count == 0 { Color::Green } else { Color::Yellow },
+        if alert_count == 0 {
+            "all clear"
+        } else {
+            "needs attention"
+        },
+        if alert_count == 0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        },
     );
 }
 
@@ -1111,7 +1148,11 @@ fn system_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemSna
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("System health").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("System health")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -1148,7 +1189,11 @@ fn process_table(frame: &mut Frame, area: Rect, monitor: &SystemSnapshot) {
         )
         .header(Row::new(["PID", "Process", "Memory", "CPU time"]))
         .column_spacing(1)
-        .block(Block::default().title("System / AgentWatch processes").borders(Borders::ALL)),
+        .block(
+            Block::default()
+                .title("System / AgentWatch processes")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1158,7 +1203,10 @@ fn monitoring_alerts(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
     let lines = if alerts.is_empty() {
         vec![Line::from(vec![
             Span::styled(" OK ", Style::default().bg(Color::Green).fg(Color::Black)),
-            Span::styled(" No active monitoring alerts", Style::default().fg(Color::Green)),
+            Span::styled(
+                " No active monitoring alerts",
+                Style::default().fg(Color::Green),
+            ),
         ])]
     } else {
         alerts
@@ -1170,7 +1218,10 @@ fn monitoring_alerts(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
                         format!(" {} ", alert.badge),
                         Style::default().bg(alert.color).fg(Color::Black),
                     ),
-                    Span::styled(format!(" {}", alert.title), Style::default().fg(alert.color)),
+                    Span::styled(
+                        format!(" {}", alert.title),
+                        Style::default().fg(alert.color),
+                    ),
                     Span::raw(format!(" · {}", alert.detail)),
                 ])
             })
@@ -1192,7 +1243,12 @@ fn collect_monitoring_alerts(data: &Data, monitor: &SystemSnapshot) -> Vec<Monit
         if cpu >= 90 {
             alerts.push(alert(Color::Red, "CRIT", "CPU high", format!("{cpu}% now")));
         } else if cpu >= 75 {
-            alerts.push(alert(Color::Yellow, "WARN", "CPU elevated", format!("{cpu}% now")));
+            alerts.push(alert(
+                Color::Yellow,
+                "WARN",
+                "CPU elevated",
+                format!("{cpu}% now"),
+            ));
         }
     }
 
@@ -1214,9 +1270,19 @@ fn collect_monitoring_alerts(data: &Data, monitor: &SystemSnapshot) -> Vec<Monit
 
     if let Some(ram) = memory_percent(monitor) {
         if ram >= 90 {
-            alerts.push(alert(Color::Red, "CRIT", "RAM high", format!("{ram}% used")));
+            alerts.push(alert(
+                Color::Red,
+                "CRIT",
+                "RAM high",
+                format!("{ram}% used"),
+            ));
         } else if ram >= 80 {
-            alerts.push(alert(Color::Yellow, "WARN", "RAM elevated", format!("{ram}% used")));
+            alerts.push(alert(
+                Color::Yellow,
+                "WARN",
+                "RAM elevated",
+                format!("{ram}% used"),
+            ));
         }
     }
 
@@ -1310,7 +1376,12 @@ fn collect_monitoring_alerts(data: &Data, monitor: &SystemSnapshot) -> Vec<Monit
     alerts
 }
 
-fn alert(color: Color, badge: &'static str, title: impl Into<String>, detail: String) -> MonitorAlert {
+fn alert(
+    color: Color,
+    badge: &'static str,
+    title: impl Into<String>,
+    detail: String,
+) -> MonitorAlert {
     MonitorAlert {
         color,
         badge,
@@ -1321,13 +1392,23 @@ fn alert(color: Color, badge: &'static str, title: impl Into<String>, detail: St
 
 fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data, selected: usize) {
     let Some(snapshot) = &data.companion else {
-        telemetry_empty_state(frame, area, "No Codex Companion snapshot", "Run `agentwatch codex-watch` to populate thread telemetry.");
+        telemetry_empty_state(
+            frame,
+            area,
+            "No Codex Companion snapshot",
+            "Run `agentwatch codex-watch` to populate thread telemetry.",
+        );
         return;
     };
 
     let threads = sorted_threads(snapshot);
     if threads.is_empty() {
-        telemetry_empty_state(frame, area, "No repository threads found", "Open a Codex thread for this repository and wait for the next poll.");
+        telemetry_empty_state(
+            frame,
+            area,
+            "No repository threads found",
+            "Open a Codex thread for this repository and wait for the next poll.",
+        );
         return;
     }
 
@@ -1365,8 +1446,10 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data, selected: u
                 .map(|usage| token_percent(usage.last.cached_input_tokens, usage.last.input_tokens))
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "-".to_owned());
-            let failed = integer_percent(thread.telemetry.failed_items, thread.telemetry.total_items);
-            let repeated = integer_percent(thread.telemetry.repeated_items, thread.telemetry.tool_calls);
+            let failed =
+                integer_percent(thread.telemetry.failed_items, thread.telemetry.total_items);
+            let repeated =
+                integer_percent(thread.telemetry.repeated_items, thread.telemetry.tool_calls);
             let row = Row::new([
                 Cell::from(short(thread_label(thread), 30)),
                 pressure_cell,
@@ -1402,7 +1485,11 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data, selected: u
             "Thread", "Context", "Tokens", "Cache", "Tools", "Fail", "Retry", "Compact",
         ]))
         .column_spacing(1)
-        .block(Block::default().title("Codex telemetry · ↑/↓ select").borders(Borders::ALL)),
+        .block(
+            Block::default()
+                .title("Codex telemetry · ↑/↓ select")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1410,13 +1497,22 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data, selected: u
 fn telemetry_empty_state(frame: &mut Frame, area: Rect, title: &str, detail: &str) {
     frame.render_widget(
         Paragraph::new(vec![
-            Line::styled(title.to_owned(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Line::styled(
+                title.to_owned(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Line::raw(""),
             Line::styled(detail.to_owned(), Style::default().fg(Color::Gray)),
             Line::raw(""),
             Line::styled("Status: WAITING", Style::default().fg(Color::Yellow)),
         ])
-        .block(Block::default().title("Codex telemetry").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title("Codex telemetry")
+                .borders(Borders::ALL),
+        )
         .wrap(Wrap { trim: true }),
         area,
     );
@@ -1427,7 +1523,11 @@ fn codex_thread_inspector(frame: &mut Frame, area: Rect, data: &Data, selected: 
         frame.render_widget(
             Paragraph::new("No thread selected")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().title("Thread inspector").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title("Thread inspector")
+                        .borders(Borders::ALL),
+                ),
             area,
         );
         return;
@@ -1438,7 +1538,11 @@ fn codex_thread_inspector(frame: &mut Frame, area: Rect, data: &Data, selected: 
         frame.render_widget(
             Paragraph::new("No thread selected")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().title("Thread inspector").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title("Thread inspector")
+                        .borders(Borders::ALL),
+                ),
             area,
         );
         return;
@@ -1452,9 +1556,17 @@ fn codex_thread_inspector(frame: &mut Frame, area: Rect, data: &Data, selected: 
         .map(|usage| token_percent(usage.last.cached_input_tokens, usage.last.input_tokens));
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(short(thread_label(thread), 46), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                short(thread_label(thread), 46),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
-            Span::styled(thread.status.clone(), Style::default().fg(thread_status_color(thread))),
+            Span::styled(
+                thread.status.clone(),
+                Style::default().fg(thread_status_color(thread)),
+            ),
         ]),
         Line::raw(format!("Thread: {}", thread.id)),
         Line::raw(format!("Source: {}", thread.source)),
@@ -1466,7 +1578,9 @@ fn codex_thread_inspector(frame: &mut Frame, area: Rect, data: &Data, selected: 
         )),
         Line::raw(format!(
             "Cache hit: {}",
-            cache.map(|value| format!("{value}%")).unwrap_or_else(|| "-".to_owned())
+            cache
+                .map(|value| format!("{value}%"))
+                .unwrap_or_else(|| "-".to_owned())
         )),
         Line::raw(format!(
             "Tools: {}  failed: {}  repeated: {}  subagents: {}  compactions: {}",
@@ -1499,7 +1613,11 @@ fn codex_thread_inspector(frame: &mut Frame, area: Rect, data: &Data, selected: 
 
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Thread inspector").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Thread inspector")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: true }),
         area,
     );
@@ -1516,7 +1634,6 @@ fn sorted_threads(snapshot: &CompanionSnapshot) -> Vec<&CompanionThread> {
                     .cmp(&thread_pressure(left).unwrap_or_default())
             })
             .then_with(|| right.updated_at.cmp(&left.updated_at))
-            .then(Ordering::Equal)
     });
     threads
 }
@@ -1580,7 +1697,11 @@ fn output_panel(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
                 ),
                 Span::styled(
                     format!("{} ", record.stream),
-                    Style::default().fg(if record.stream == "stderr" { Color::Yellow } else { Color::Gray }),
+                    Style::default().fg(if record.stream == "stderr" {
+                        Color::Yellow
+                    } else {
+                        Color::Gray
+                    }),
                 ),
                 Span::raw(record.text.clone()),
             ])
@@ -1619,7 +1740,10 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         .unwrap_or_else(|| "running".to_owned());
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(status, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                status,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("  {}", run.provider)),
         ]),
         Line::raw(format!("Run ID: {}", run.id)),
@@ -1633,7 +1757,10 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "-".to_owned())
         )),
-        Line::raw(format!("Policy: {}", run.risk.as_deref().unwrap_or("allow"))),
+        Line::raw(format!(
+            "Policy: {}",
+            run.risk.as_deref().unwrap_or("allow")
+        )),
         Line::raw(""),
         Line::styled("Command", Style::default().fg(Color::DarkGray)),
         Line::raw(run.command.clone()),
@@ -1700,9 +1827,7 @@ fn append_companion_details(lines: &mut Vec<Line<'static>>, thread: &CompanionTh
     }
     lines.push(Line::raw(format!(
         "Tools: {}  Failed: {}  Repeated: {}",
-        thread.telemetry.tool_calls,
-        thread.telemetry.failed_items,
-        thread.telemetry.repeated_items
+        thread.telemetry.tool_calls, thread.telemetry.failed_items, thread.telemetry.repeated_items
     )));
     lines.push(Line::raw(format!(
         "Compactions: {}  Subagents: {}",
@@ -1743,7 +1868,9 @@ fn key(value: &'static str) -> Span<'static> {
 
 fn approval_overlay(frame: &mut Frame, request: &ApprovalRequest, pending: usize) {
     let area = frame.area();
-    let width = (area.width.saturating_mul(82) / 100).max(40).min(area.width);
+    let width = (area.width.saturating_mul(82) / 100)
+        .max(40)
+        .min(area.width);
     let height = 11_u16.min(area.height);
     let popup = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
@@ -1760,7 +1887,10 @@ fn approval_overlay(frame: &mut Frame, request: &ApprovalRequest, pending: usize
                 format!("Reason: {}", request.reason),
                 Style::default().fg(Color::Yellow),
             ),
-            Line::styled(format!("Risk: {}", request.risk), Style::default().fg(Color::Red)),
+            Line::styled(
+                format!("Risk: {}", request.risk),
+                Style::default().fg(Color::Red),
+            ),
             Line::raw(""),
             Line::raw("a Allow once   s Allow session   d Deny"),
         ])
@@ -1824,9 +1954,15 @@ fn diff_lines(view: &RunDiffView) -> Vec<Line<'static>> {
     };
 
     let mut lines = vec![Line::from(vec![
-        Span::styled(format!("+{}", diff.meta.added), Style::default().fg(Color::Green)),
+        Span::styled(
+            format!("+{}", diff.meta.added),
+            Style::default().fg(Color::Green),
+        ),
         Span::raw("  "),
-        Span::styled(format!("-{}", diff.meta.removed), Style::default().fg(Color::Red)),
+        Span::styled(
+            format!("-{}", diff.meta.removed),
+            Style::default().fg(Color::Red),
+        ),
         Span::raw(format!("  {} files", diff.meta.files.len())),
     ])];
     lines.push(Line::raw(""));
@@ -2026,7 +2162,11 @@ fn utilization_color(value: Option<usize>) -> Color {
 fn progress_bar(percent: usize, width: usize) -> String {
     let percent = percent.min(100);
     let filled = percent.saturating_mul(width).checked_div(100).unwrap_or(0);
-    format!("{}{}", "█".repeat(filled), "░".repeat(width.saturating_sub(filled)))
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
 }
 
 fn peak(history: &[u64]) -> u64 {
@@ -2084,11 +2224,7 @@ fn bytes(value: u64) -> String {
 }
 
 fn clamp_index(index: usize, len: usize) -> usize {
-    if len == 0 {
-        0
-    } else {
-        index.min(len - 1)
-    }
+    if len == 0 { 0 } else { index.min(len - 1) }
 }
 
 #[cfg(test)]
