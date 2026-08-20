@@ -1,3 +1,4 @@
+mod account_safety;
 mod agent;
 mod app_server;
 mod approval;
