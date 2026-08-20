@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
+    account_safety::{self, CompanionNotificationMethod, CompanionRequestMethod},
     policy::{self, Decision},
     redaction, session,
 };
@@ -266,7 +267,7 @@ fn poll(
     known: &HashMap<String, ThreadObservation>,
 ) -> Result<Vec<ThreadObservation>> {
     let result = client.request(
-        "thread/list",
+        CompanionRequestMethod::ThreadList,
         json!({
             "cwd": canonical_root(root),
             "limit": thread_limit,
@@ -297,7 +298,10 @@ fn poll(
         });
 
         if needs_read {
-            match client.request("thread/read", json!({"threadId": id, "includeTurns": true})) {
+            match client.request(
+                CompanionRequestMethod::ThreadRead,
+                json!({"threadId": id, "includeTurns": true}),
+            ) {
                 Ok(read) => {
                     if let Some(thread) = read.get("thread") {
                         let mut observation = parse_thread(thread)?;
@@ -553,7 +557,8 @@ fn parse_thread(value: &Value) -> Result<ThreadObservation> {
 }
 
 fn read_latest_token_usage(path: &Path) -> Result<Option<CompanionTokenUsage>> {
-    let mut file = fs::File::open(path)
+    let path = account_safety::validate_companion_rollout_path(path)?;
+    let mut file = fs::File::open(&path)
         .with_context(|| format!("failed to open Codex rollout {}", path.display()))?;
     let mut end = file
         .metadata()
@@ -1020,7 +1025,7 @@ impl ReadOnlyAppServer {
 
     fn initialize(&mut self) -> Result<()> {
         self.request(
-            "initialize",
+            CompanionRequestMethod::Initialize,
             json!({
                 "clientInfo": {
                     "name": "agentwatch_companion",
@@ -1029,13 +1034,11 @@ impl ReadOnlyAppServer {
                 }
             }),
         )?;
-        self.notify("initialized", json!({}))
+        self.notify(CompanionNotificationMethod::Initialized, json!({}))
     }
 
-    fn request(&mut self, method: &str, params: Value) -> Result<Value> {
-        if !matches!(method, "initialize" | "thread/list" | "thread/read") {
-            bail!("Companion Mode refused non-read App Server method `{method}`");
-        }
+    fn request(&mut self, method: CompanionRequestMethod, params: Value) -> Result<Value> {
+        let method = method.as_str();
         let id = self.next_id;
         self.next_id += 1;
         self.send(&json!({"method": method, "id": id, "params": params}))?;
@@ -1060,14 +1063,12 @@ impl ReadOnlyAppServer {
         }
     }
 
-    fn notify(&mut self, method: &str, params: Value) -> Result<()> {
-        if method != "initialized" {
-            bail!("Companion Mode refused App Server notification `{method}`");
-        }
-        self.send(&json!({"method": method, "params": params}))
+    fn notify(&mut self, method: CompanionNotificationMethod, params: Value) -> Result<()> {
+        self.send(&json!({"method": method.as_str(), "params": params}))
     }
 
     fn send(&mut self, value: &Value) -> Result<()> {
+        account_safety::validate_companion_message(value)?;
         serde_json::to_writer(&mut self.stdin, value)
             .context("failed to encode Codex App Server companion request")?;
         self.stdin
