@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - master
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - synchronize
+      - reopened
   workflow_dispatch:
 
 permissions:
@@ -12,11 +19,20 @@ permissions:
 env:
   RELEASE_VERSION: 0.1.0
   RELEASE_TAG: v0.1.0
+  TARGET_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
 
 jobs:
   build:
     name: Build release (${{ matrix.os }})
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: v')) ||
+        (github.event_name == 'pull_request' &&
+         github.actor == github.repository_owner &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.title == 'release-publish: v0.1.0')
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,8 +44,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - name: Checkout
+      - name: Checkout release target
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -73,13 +91,23 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.head_commit.message, 'release: v')
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release: v')) ||
+        (github.event_name == 'pull_request' &&
+         github.actor == github.repository_owner &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.title == 'release-publish: v0.1.0')
+      }}
     needs: build
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout release target
         uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TARGET_SHA }}
 
       - name: Download release assets
         uses: actions/download-artifact@v4
@@ -116,7 +144,7 @@ jobs:
             gh release upload "$RELEASE_TAG" dist/* --clobber
           else
             gh release create "$RELEASE_TAG" dist/* \
-              --target "$GITHUB_SHA" \
+              --target "$TARGET_SHA" \
               --title "AgentWatch $RELEASE_TAG — First Public Release" \
               --notes-file RELEASE_NOTES.md \
               --latest
@@ -143,11 +171,12 @@ jobs:
           release_url=$(gh release view "$RELEASE_TAG" --json url --jq '.url')
           published_at=$(gh release view "$RELEASE_TAG" --json publishedAt --jq '.publishedAt')
           asset_names=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')
+          receipt=$(mktemp)
 
-          mkdir -p .github/release-receipts
           {
             echo "tag=${RELEASE_TAG}"
             echo "tag_sha=${tag_sha}"
+            echo "target_sha=${TARGET_SHA}"
             echo "release_url=${release_url}"
             echo "published_at=${published_at}"
             echo
@@ -156,8 +185,12 @@ jobs:
             echo
             echo "checksums:"
             cat dist/SHA256SUMS
-          } > ".github/release-receipts/${RELEASE_TAG}.txt"
+          } > "$receipt"
 
+          git fetch origin master
+          git checkout -B release-receipt origin/master
+          mkdir -p .github/release-receipts
+          cp "$receipt" ".github/release-receipts/${RELEASE_TAG}.txt"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add ".github/release-receipts/${RELEASE_TAG}.txt"
