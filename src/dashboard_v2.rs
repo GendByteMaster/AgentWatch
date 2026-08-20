@@ -15,7 +15,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Tabs, Wrap},
 };
 
 use crate::{
@@ -943,20 +943,31 @@ fn changed_files(frame: &mut Frame, area: Rect, data: &Data) {
 fn monitoring_page(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemSnapshot) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(10)])
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(9),
+            Constraint::Min(12),
+        ])
         .split(area);
     monitoring_cards(frame, layout[0], data, monitor);
+    resource_history(frame, layout[1], monitor);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(layout[1]);
-    process_table(frame, body[0], monitor);
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(layout[2]);
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+        .split(body[0]);
+    process_table(frame, left[0], monitor);
+    agentwatch_health(frame, left[1], data, monitor);
+
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
         .split(body[1]);
-    monitoring_health(frame, right[0], data, monitor);
+    monitoring_alerts(frame, right[0], data, monitor);
     codex_telemetry_table(frame, right[1], data);
 }
 
@@ -970,51 +981,116 @@ fn monitoring_cards(frame: &mut Frame, area: Rect, data: &Data, monitor: &System
             Constraint::Percentage(25),
         ])
         .split(area);
+    let cpu_percent = monitor.cpu_percent.map(|value| value.round() as usize);
     let cpu = monitor
         .cpu_percent
         .map(|value| format!("{value:.1}%"))
         .unwrap_or_else(|| "warming up".to_owned());
+    let memory_percent = host_memory_percent(monitor);
     let memory = match (monitor.memory_used_bytes, monitor.memory_total_bytes) {
         (Some(used), Some(total)) => format!("{} / {}", bytes(used), bytes(total)),
         _ => "unavailable".to_owned(),
     };
+    let max_context = max_context_pressure(data);
+    let context = max_context
+        .map(|value| format!("{value}%"))
+        .unwrap_or_else(|| "unavailable".to_owned());
     let token_threads = token_thread_count(data);
 
     metric_card(
         frame,
         areas[0],
-        "Host CPU",
+        "System · CPU",
         &cpu,
         &monitor.platform,
-        Color::Cyan,
+        threshold_color(cpu_percent, 75, 90),
     );
     metric_card(
         frame,
         areas[1],
-        "Host memory",
+        "System · RAM",
         &memory,
-        "physical RAM",
-        Color::Magenta,
+        &memory_percent
+            .map(|value| format!("{value}% physical memory"))
+            .unwrap_or_else(|| "physical memory".to_owned()),
+        threshold_color(memory_percent, 80, 90),
     );
     metric_card(
         frame,
         areas[2],
-        "Watched processes",
+        "AgentWatch · Processes",
         &monitor.processes.len().to_string(),
         "agentwatch + codex",
-        Color::Green,
+        if monitor.error.is_some() {
+            Color::Yellow
+        } else {
+            Color::Green
+        },
     );
     metric_card(
         frame,
         areas[3],
-        "Token telemetry",
-        &token_threads.to_string(),
-        "Codex threads reporting usage",
-        if token_threads > 0 {
-            Color::Green
-        } else {
-            Color::Yellow
-        },
+        "Codex · Context",
+        &context,
+        &format!("{token_threads} threads with token data"),
+        threshold_color(max_context, 70, 85),
+    );
+}
+
+fn resource_history(frame: &mut Frame, area: Rect, monitor: &SystemSnapshot) {
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    resource_sparkline(
+        frame,
+        columns[0],
+        "System · CPU history",
+        &monitor.cpu_history,
+        monitor.cpu_percent.map(|value| value.round() as usize),
+        Color::Cyan,
+    );
+    resource_sparkline(
+        frame,
+        columns[1],
+        "System · RAM history",
+        &monitor.memory_history,
+        host_memory_percent(monitor),
+        Color::Magenta,
+    );
+}
+
+fn resource_sparkline(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    history: &[u64],
+    current: Option<usize>,
+    color: Color,
+) {
+    let current = current
+        .map(|value| format!("{value}%"))
+        .unwrap_or_else(|| "collecting".to_owned());
+    let peak = history.iter().copied().max().unwrap_or_default();
+    let title = format!("{title} · now {current} · peak {peak}% · last {} samples", history.len());
+
+    if history.is_empty() {
+        frame.render_widget(
+            Paragraph::new("Collecting samples…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().title(title).borders(Borders::ALL)),
+            area,
+        );
+        return;
+    }
+
+    frame.render_widget(
+        Sparkline::default()
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .data(history)
+            .max(100)
+            .style(Style::default().fg(color)),
+        area,
     );
 }
 
@@ -1049,12 +1125,16 @@ fn process_table(frame: &mut Frame, area: Rect, monitor: &SystemSnapshot) {
         )
         .header(Row::new(["PID", "Process", "Memory", "CPU time"]))
         .column_spacing(1)
-        .block(Block::default().title("Processes").borders(Borders::ALL)),
+        .block(
+            Block::default()
+                .title("System · Processes")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
 
-fn monitoring_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemSnapshot) {
+fn agentwatch_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemSnapshot) {
     let connected = data
         .companion
         .as_ref()
@@ -1068,28 +1148,23 @@ fn monitoring_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
             "stopped",
         ),
         health_line("Codex companion", connected, "connected", "offline"),
+        health_line(
+            "Host sampler",
+            monitor.error.is_none(),
+            "healthy",
+            "degraded",
+        ),
+        Line::raw(format!("Pending approvals    {}", data.approvals.len())),
         Line::raw(format!("Token sources        {token_threads}")),
         Line::raw(format!("Tracked processes    {}", monitor.processes.len())),
         Line::raw(format!("Event log            {} events", data.events.len())),
         Line::raw(format!("Runs                 {} total", data.runs.len())),
-        Line::styled(
-            monitor
-                .error
-                .as_deref()
-                .unwrap_or("Host sampler healthy")
-                .to_owned(),
-            Style::default().fg(if monitor.error.is_some() {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
     ];
     frame.render_widget(
         Paragraph::new(lines)
             .block(
                 Block::default()
-                    .title("Monitoring health")
+                    .title("AgentWatch · Health")
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: false }),
@@ -1098,13 +1173,197 @@ fn monitoring_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
 }
 
 fn health_line(label: &str, ok: bool, yes: &str, no: &str) -> Line<'static> {
+    let badge_style = if ok {
+        Style::default().bg(Color::Green).fg(Color::Black)
+    } else {
+        Style::default().bg(Color::Yellow).fg(Color::Black)
+    };
     Line::from(vec![
-        Span::raw(format!("{label:<20}")),
+        Span::styled(if ok { " OK " } else { " WARN " }, badge_style),
+        Span::raw(format!(" {label:<18}")),
         Span::styled(
             if ok { yes } else { no }.to_owned(),
             Style::default().fg(if ok { Color::Green } else { Color::Yellow }),
         ),
     ])
+}
+
+fn monitoring_alerts(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemSnapshot) {
+    let alerts = collect_monitoring_alerts(data, monitor);
+    let lines = if alerts.is_empty() {
+        vec![Line::from(vec![
+            Span::styled(
+                " OK ",
+                Style::default().bg(Color::Green).fg(Color::Black),
+            ),
+            Span::styled(
+                " No active monitoring alerts",
+                Style::default().fg(Color::Green),
+            ),
+        ])]
+    } else {
+        alerts
+            .into_iter()
+            .take(area.height.saturating_sub(2) as usize)
+            .map(|(color, label, detail)| {
+                let badge = if color == Color::Red {
+                    " CRIT "
+                } else if color == Color::Yellow {
+                    " WARN "
+                } else {
+                    " INFO "
+                };
+                Line::from(vec![
+                    Span::styled(
+                        badge,
+                        Style::default().bg(color).fg(if color == Color::Yellow {
+                            Color::Black
+                        } else {
+                            Color::White
+                        }),
+                    ),
+                    Span::styled(format!(" {label:<12}"), Style::default().fg(color)),
+                    Span::raw(detail),
+                ])
+            })
+            .collect()
+    };
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Codex · Alerts")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn collect_monitoring_alerts(
+    data: &Data,
+    monitor: &SystemSnapshot,
+) -> Vec<(Color, String, String)> {
+    let mut alerts = Vec::new();
+
+    if let Some(cpu) = monitor.cpu_percent.map(|value| value.round() as usize) {
+        if cpu >= 90 {
+            alerts.push((Color::Red, "CPU".to_owned(), format!("host usage {cpu}%")));
+        } else if cpu >= 75 {
+            alerts.push((
+                Color::Yellow,
+                "CPU".to_owned(),
+                format!("host usage {cpu}%"),
+            ));
+        }
+    }
+
+    if let Some(memory) = host_memory_percent(monitor) {
+        if memory >= 90 {
+            alerts.push((
+                Color::Red,
+                "RAM".to_owned(),
+                format!("physical memory {memory}%"),
+            ));
+        } else if memory >= 80 {
+            alerts.push((
+                Color::Yellow,
+                "RAM".to_owned(),
+                format!("physical memory {memory}%"),
+            ));
+        }
+    }
+
+    if let Some(error) = &monitor.error {
+        alerts.push((
+            Color::Yellow,
+            "Sampler".to_owned(),
+            short(error, 54),
+        ));
+    }
+
+    if !data
+        .companion
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.connected)
+    {
+        alerts.push((
+            Color::Yellow,
+            "Companion".to_owned(),
+            "Codex companion is offline".to_owned(),
+        ));
+    }
+
+    if let Some(snapshot) = &data.companion {
+        for thread in &snapshot.threads {
+            let label = short(thread_label(thread), 18);
+            let telemetry = &thread.telemetry;
+            if let Some(pressure) = telemetry
+                .token_usage
+                .as_ref()
+                .and_then(context_pressure_percent)
+            {
+                if pressure >= 85 {
+                    alerts.push((
+                        Color::Red,
+                        "Context".to_owned(),
+                        format!("{label} at {pressure}%"),
+                    ));
+                } else if pressure >= 70 {
+                    alerts.push((
+                        Color::Yellow,
+                        "Context".to_owned(),
+                        format!("{label} at {pressure}%"),
+                    ));
+                }
+            }
+
+            let failure_percent = integer_percent(telemetry.failed_items, telemetry.total_items);
+            if failure_percent >= 20 {
+                alerts.push((
+                    Color::Red,
+                    "Failures".to_owned(),
+                    format!("{label} {failure_percent}% failed items"),
+                ));
+            } else if telemetry.failed_items > 0 {
+                alerts.push((
+                    Color::Yellow,
+                    "Failures".to_owned(),
+                    format!("{label} {} failed items", telemetry.failed_items),
+                ));
+            }
+
+            let repeat_percent = integer_percent(telemetry.repeated_items, telemetry.tool_calls);
+            if repeat_percent >= 30 {
+                alerts.push((
+                    Color::Red,
+                    "Repeats".to_owned(),
+                    format!("{label} {repeat_percent}% repeated tools"),
+                ));
+            } else if repeat_percent >= 15 {
+                alerts.push((
+                    Color::Yellow,
+                    "Repeats".to_owned(),
+                    format!("{label} {repeat_percent}% repeated tools"),
+                ));
+            }
+
+            if telemetry.compactions > 0 {
+                let last = telemetry
+                    .last_compaction_at
+                    .map(unix_clock)
+                    .unwrap_or_else(|| "unknown".to_owned());
+                alerts.push((
+                    Color::Cyan,
+                    "Compaction".to_owned(),
+                    format!("{label} ×{} · last {last}", telemetry.compactions),
+                ));
+            }
+        }
+    }
+
+    alerts
 }
 
 fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
@@ -1114,7 +1373,7 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
                 .style(Style::default().fg(Color::DarkGray))
                 .block(
                     Block::default()
-                        .title("Codex telemetry")
+                        .title("Codex · Telemetry")
                         .borders(Borders::ALL),
                 ),
             area,
@@ -1128,10 +1387,15 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
         .take(area.height.saturating_sub(3) as usize)
         .map(|thread| {
             let usage = thread.telemetry.token_usage.as_ref();
-            let pressure = usage
-                .and_then(context_pressure_percent)
-                .map(|value| format!("{value}%"))
-                .unwrap_or_else(|| "-".to_owned());
+            let pressure = usage.and_then(context_pressure_percent);
+            let pressure_cell = pressure
+                .map(|value| {
+                    Cell::from(context_meter(value, 8))
+                        .style(Style::default().fg(context_pressure_color(Some(value))))
+                })
+                .unwrap_or_else(|| {
+                    Cell::from("-".to_owned()).style(Style::default().fg(Color::DarkGray))
+                });
             let tokens = usage
                 .map(|usage| format_token_count(usage.total.total_tokens))
                 .unwrap_or_else(|| "-".to_owned());
@@ -1139,34 +1403,50 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
                 .map(|usage| token_percent(usage.last.cached_input_tokens, usage.last.input_tokens))
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "-".to_owned());
+            let failed = integer_percent(
+                thread.telemetry.failed_items,
+                thread.telemetry.total_items,
+            );
+            let repeated = integer_percent(
+                thread.telemetry.repeated_items,
+                thread.telemetry.tool_calls,
+            );
             Row::new([
-                short(thread_label(thread), 30),
-                pressure,
-                tokens,
-                cache,
-                thread.telemetry.tool_calls.to_string(),
-                thread.telemetry.compactions.to_string(),
+                Cell::from(short(thread_label(thread), 28)),
+                pressure_cell,
+                Cell::from(tokens),
+                Cell::from(cache),
+                Cell::from(thread.telemetry.tool_calls.to_string()),
+                Cell::from(format!("{failed}%/{repeated}%")),
+                Cell::from(thread.telemetry.compactions.to_string()),
             ])
         });
     frame.render_widget(
         Table::new(
             rows,
             [
-                Constraint::Min(22),
+                Constraint::Min(20),
+                Constraint::Length(14),
                 Constraint::Length(9),
-                Constraint::Length(10),
-                Constraint::Length(8),
                 Constraint::Length(7),
-                Constraint::Length(8),
+                Constraint::Length(6),
+                Constraint::Length(11),
+                Constraint::Length(7),
             ],
         )
         .header(Row::new([
-            "Thread", "Context", "Tokens", "Cache", "Tools", "Compact",
+            "Thread",
+            "Context",
+            "Tokens",
+            "Cache",
+            "Tools",
+            "Fail/Repeat",
+            "Compact",
         ]))
         .column_spacing(1)
         .block(
             Block::default()
-                .title("Codex telemetry")
+                .title("Codex · Telemetry")
                 .borders(Borders::ALL),
         ),
         area,
@@ -1319,10 +1599,16 @@ fn append_companion_details(
         Style::default().fg(Color::Magenta),
     ));
     if let Some(usage) = &telemetry.token_usage {
-        let pressure = context_pressure_percent(usage)
-            .map(|value| format!("{value}%"))
-            .unwrap_or_else(|| "-".to_owned());
-        lines.push(Line::raw(format!("Context pressure: {pressure}")));
+        let pressure = context_pressure_percent(usage);
+        lines.push(Line::styled(
+            format!(
+                "Context: {}",
+                pressure
+                    .map(|value| context_meter(value, 12))
+                    .unwrap_or_else(|| "-".to_owned())
+            ),
+            Style::default().fg(context_pressure_color(pressure)),
+        ));
         lines.push(Line::raw(format!(
             "Input: {}  Cached: {} ({}%)",
             format_token_count(usage.last.input_tokens),
@@ -1524,6 +1810,16 @@ fn token_thread_count(data: &Data) -> usize {
         .unwrap_or_default()
 }
 
+fn max_context_pressure(data: &Data) -> Option<usize> {
+    data.companion.as_ref()?.threads.iter().filter_map(|thread| {
+        thread
+            .telemetry
+            .token_usage
+            .as_ref()
+            .and_then(context_pressure_percent)
+    }).max()
+}
+
 fn thread_label(thread: &companion::CompanionThread) -> &str {
     thread
         .name
@@ -1581,6 +1877,48 @@ fn context_pressure_percent(usage: &companion::CompanionTokenUsage) -> Option<us
     Some(token_percent(usage.last.input_tokens, window))
 }
 
+fn context_pressure_color(pressure: Option<usize>) -> Color {
+    match pressure {
+        Some(value) if value >= 85 => Color::Red,
+        Some(value) if value >= 70 => Color::Yellow,
+        Some(_) => Color::Green,
+        None => Color::DarkGray,
+    }
+}
+
+fn context_meter(percent: usize, width: usize) -> String {
+    let percent = percent.min(100);
+    let filled = percent.saturating_mul(width) / 100;
+    format!(
+        "{}{} {:>3}%",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled)),
+        percent
+    )
+}
+
+fn threshold_color(value: Option<usize>, warning: usize, critical: usize) -> Color {
+    match value {
+        Some(value) if value >= critical => Color::Red,
+        Some(value) if value >= warning => Color::Yellow,
+        Some(_) => Color::Green,
+        None => Color::DarkGray,
+    }
+}
+
+fn host_memory_percent(monitor: &SystemSnapshot) -> Option<usize> {
+    let used = u128::from(monitor.memory_used_bytes?);
+    let total = u128::from(monitor.memory_total_bytes?);
+    if total == 0 {
+        return None;
+    }
+    usize::try_from(used.saturating_mul(100) / total).ok()
+}
+
+fn integer_percent(part: usize, total: usize) -> usize {
+    part.saturating_mul(100).checked_div(total).unwrap_or(0)
+}
+
 fn token_percent(part: i64, total: i64) -> usize {
     if part <= 0 || total <= 0 {
         return 0;
@@ -1599,6 +1937,12 @@ fn format_token_count(value: i64) -> String {
     } else {
         value.to_string()
     }
+}
+
+fn unix_clock(timestamp: i64) -> String {
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
+        .map(|value| value.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn duration(ms: u64) -> String {
@@ -1642,7 +1986,8 @@ fn bytes(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Page, token_percent};
+    use super::{Page, context_meter, integer_percent, threshold_color, token_percent};
+    use ratatui::style::Color;
 
     #[test]
     fn cycles_pages() {
@@ -1656,5 +2001,23 @@ mod tests {
     fn computes_token_percentages() {
         assert_eq!(token_percent(640_000, 1_000_000), 64);
         assert_eq!(token_percent(0, 1_000_000), 0);
+    }
+
+    #[test]
+    fn renders_context_meter() {
+        assert_eq!(context_meter(50, 8), "████░░░░  50%");
+    }
+
+    #[test]
+    fn computes_integer_percentages() {
+        assert_eq!(integer_percent(3, 10), 30);
+        assert_eq!(integer_percent(1, 0), 0);
+    }
+
+    #[test]
+    fn classifies_thresholds() {
+        assert_eq!(threshold_color(Some(95), 75, 90), Color::Red);
+        assert_eq!(threshold_color(Some(80), 75, 90), Color::Yellow);
+        assert_eq!(threshold_color(Some(40), 75, 90), Color::Green);
     }
 }
