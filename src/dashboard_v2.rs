@@ -83,7 +83,6 @@ struct RunDiffView {
 struct UiState {
     page: Page,
     selected_run: usize,
-    output_scroll: usize,
     show_all_output: bool,
     diff_view: Option<RunDiffView>,
     diff_scroll: usize,
@@ -94,7 +93,6 @@ impl Default for UiState {
         Self {
             page: Page::Overview,
             selected_run: 0,
-            output_scroll: 0,
             show_all_output: false,
             diff_view: None,
             diff_scroll: 0,
@@ -109,20 +107,28 @@ impl UiState {
         } else {
             self.selected_run.min(data.runs.len() - 1)
         };
-        self.output_scroll = self
-            .output_scroll
-            .min(filtered_output_count(data, self).saturating_sub(1));
     }
 
     fn select_previous_run(&mut self) {
         self.selected_run = self.selected_run.saturating_sub(1);
-        self.output_scroll = 0;
     }
 
     fn select_next_run(&mut self, data: &Data) {
         if self.selected_run + 1 < data.runs.len() {
             self.selected_run += 1;
-            self.output_scroll = 0;
+        }
+    }
+
+    fn page_up_runs(&mut self) {
+        self.selected_run = self.selected_run.saturating_sub(PAGE_STEP);
+    }
+
+    fn page_down_runs(&mut self, data: &Data) {
+        if !data.runs.is_empty() {
+            self.selected_run = self
+                .selected_run
+                .saturating_add(PAGE_STEP)
+                .min(data.runs.len() - 1);
         }
     }
 
@@ -130,6 +136,7 @@ impl UiState {
         let Some(run) = data.runs.get(self.selected_run) else {
             return;
         };
+
         if run.companion.is_some() {
             self.diff_view = Some(RunDiffView {
                 run_id: run.id.clone(),
@@ -141,12 +148,10 @@ impl UiState {
             self.diff_scroll = 0;
             return;
         }
+
         let (diff, message) = match run_diff::load(root, &run.id) {
             Ok(Some(diff)) => (Some(diff), None),
-            Ok(None) => (
-                None,
-                Some("No persisted diff for this run yet.".to_owned()),
-            ),
+            Ok(None) => (None, Some("No persisted diff for this run yet.".to_owned())),
             Err(error) => (None, Some(format!("Failed to load run diff: {error}"))),
         };
         self.diff_view = Some(RunDiffView {
@@ -229,6 +234,7 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
             approval_ipc::touch_tui_heartbeat(root).map_err(std::io::Error::other)?;
             heartbeat = Instant::now();
         }
+
         if refreshed.elapsed() >= DATA_REFRESH {
             if let Ok(next) = load(root) {
                 data = next;
@@ -236,6 +242,7 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
             }
             refreshed = Instant::now();
         }
+
         if ui.page == Page::Monitoring {
             monitor.refresh_if_due(MONITOR_REFRESH);
         }
@@ -272,8 +279,8 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
         }
 
         if ui.diff_view.is_some() {
-            let max_scroll = diff_line_count(ui.diff_view.as_ref().expect("diff view"))
-                .saturating_sub(1);
+            let max_scroll =
+                diff_line_count(ui.diff_view.as_ref().expect("diff view")).saturating_sub(1);
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('d') | KeyCode::Esc => {
@@ -318,22 +325,10 @@ fn loop_tui(terminal: &mut DefaultTerminal, root: &Path) -> std::io::Result<()> 
             KeyCode::Down | KeyCode::Char('j') if ui.page == Page::Runs => {
                 ui.select_next_run(&data)
             }
-            KeyCode::PageUp if ui.page == Page::Runs => {
-                ui.selected_run = ui.selected_run.saturating_sub(PAGE_STEP);
-                ui.output_scroll = 0;
-            }
-            KeyCode::PageDown if ui.page == Page::Runs => {
-                if !data.runs.is_empty() {
-                    ui.selected_run = ui
-                        .selected_run
-                        .saturating_add(PAGE_STEP)
-                        .min(data.runs.len() - 1);
-                    ui.output_scroll = 0;
-                }
-            }
+            KeyCode::PageUp if ui.page == Page::Runs => ui.page_up_runs(),
+            KeyCode::PageDown if ui.page == Page::Runs => ui.page_down_runs(&data),
             KeyCode::Char('a') if ui.page == Page::Runs => {
-                ui.show_all_output = !ui.show_all_output;
-                ui.output_scroll = 0;
+                ui.show_all_output = !ui.show_all_output
             }
             KeyCode::Char('d') if ui.page == Page::Runs => ui.open_diff(root, &data),
             _ => {}
@@ -359,6 +354,7 @@ fn load(root: &Path) -> Result<Data> {
         Err(error) => (None, Some(error.to_string())),
     };
     let runs = aggregate_runs(&events, companion.as_ref());
+
     Ok(Data {
         meta,
         approvals,
@@ -376,6 +372,7 @@ fn read_events(root: &Path) -> Result<Vec<SessionEvent>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
+
     let file = fs::File::open(path).context("failed to open event log")?;
     let mut events = Vec::new();
     for line in BufReader::new(file).lines() {
@@ -389,7 +386,10 @@ fn read_events(root: &Path) -> Result<Vec<SessionEvent>> {
 
 fn aggregate_runs(events: &[SessionEvent], companion: Option<&CompanionSnapshot>) -> Vec<AgentRun> {
     let mut runs = BTreeMap::<String, AgentRun>::new();
-    for event in events.iter().filter(|event| event.kind.starts_with("agent")) {
+    for event in events
+        .iter()
+        .filter(|event| event.kind.starts_with("agent"))
+    {
         let Some(id) = event.run_id.clone() else {
             continue;
         };
@@ -439,9 +439,11 @@ fn aggregate_runs(events: &[SessionEvent], companion: Option<&CompanionSnapshot>
             _ => {}
         }
     }
+
     if let Some(snapshot) = companion {
         merge_companion_runs(&mut runs, events, snapshot);
     }
+
     let mut runs = runs.into_values().collect::<Vec<_>>();
     runs.sort_by_key(|run| std::cmp::Reverse(run.started));
     runs
@@ -463,6 +465,7 @@ fn merge_companion_runs(
         if runs.contains_key(&id) {
             continue;
         }
+
         let started = turn
             .started_at
             .and_then(unix_datetime)
@@ -493,6 +496,7 @@ fn merge_companion_runs(
             .or_else(|| (!thread.preview.trim().is_empty()).then_some(thread.preview.as_str()))
             .unwrap_or(thread.id.as_str())
             .to_owned();
+
         runs.insert(
             id.clone(),
             AgentRun {
@@ -530,9 +534,10 @@ fn companion_run_status(status: &str) -> Option<RunStatus> {
 }
 
 fn unix_datetime(timestamp: i64) -> Option<DateTime<Utc>> {
-    (timestamp > 0)
-        .then(|| DateTime::<Utc>::from_timestamp(timestamp, 0))
-        .flatten()
+    if timestamp <= 0 {
+        return None;
+    }
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
 }
 
 fn git_info(root: &Path) -> GitInfo {
@@ -548,15 +553,23 @@ fn git_info(root: &Path) -> GitInfo {
                 .collect()
         })
         .unwrap_or_default();
+
     let mut added = 0;
     let mut removed = 0;
     if let Some(diff) = git_output(root, &["diff", "--numstat", "HEAD"]) {
         for line in diff.lines() {
             let mut parts = line.split('\t');
-            added += parts.next().and_then(|value| value.parse().ok()).unwrap_or(0);
-            removed += parts.next().and_then(|value| value.parse().ok()).unwrap_or(0);
+            added += parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            removed += parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
         }
     }
+
     GitInfo {
         branch,
         added,
@@ -566,7 +579,11 @@ fn git_info(root: &Path) -> GitInfo {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).current_dir(root).output().ok()?;
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
     output
         .status
         .success()
@@ -578,6 +595,7 @@ fn draw(frame: &mut Frame, data: &Data, ui: &UiState, monitor: &SystemSnapshot) 
         draw_diff(frame, data, ui, view);
         return;
     }
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -595,6 +613,7 @@ fn draw(frame: &mut Frame, data: &Data, ui: &UiState, monitor: &SystemSnapshot) 
         Page::Runs => runs_page(frame, layout[2], data, ui),
     }
     footer(frame, layout[3], ui);
+
     if let Some(request) = data.approvals.first() {
         approval_overlay(frame, request, data.approvals.len());
     }
@@ -656,6 +675,7 @@ fn overview_page(frame: &mut Frame, area: Rect, data: &Data) {
         .constraints([Constraint::Length(7), Constraint::Min(10)])
         .split(area);
     overview_cards(frame, layout[0], data);
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -666,6 +686,7 @@ fn overview_page(frame: &mut Frame, area: Rect, data: &Data) {
         .split(body[0]);
     recent_runs(frame, left[0], data, None);
     recent_events(frame, left[1], data);
+
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
@@ -695,17 +716,8 @@ fn overview_cards(frame: &mut Frame, area: Rect, data: &Data) {
         .filter(|run| matches!(run.status, RunStatus::Running))
         .count();
     let codex_state = companion_state(data);
-    let token_threads = data
-        .companion
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .threads
-                .iter()
-                .filter(|thread| thread.telemetry.token_usage.is_some())
-                .count()
-        })
-        .unwrap_or(0);
+    let token_threads = token_thread_count(data);
+
     metric_card(
         frame,
         areas[0],
@@ -728,7 +740,11 @@ fn overview_cards(frame: &mut Frame, area: Rect, data: &Data) {
         "Agent runs",
         &data.runs.len().to_string(),
         &format!("{running} running · {failed} failed"),
-        if failed == 0 { Color::Green } else { Color::Yellow },
+        if failed == 0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        },
     );
     metric_card(
         frame,
@@ -835,7 +851,11 @@ fn recent_events(frame: &mut Frame, area: Rect, data: &Data) {
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Activity timeline").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Activity timeline")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -846,11 +866,16 @@ fn codex_activity(frame: &mut Frame, area: Rect, data: &Data) {
         frame.render_widget(
             Paragraph::new("No companion snapshot. Start `agentwatch codex-watch`.")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().title("Codex activity").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title("Codex activity")
+                        .borders(Borders::ALL),
+                ),
             area,
         );
         return;
     };
+
     let rows = snapshot
         .threads
         .iter()
@@ -865,14 +890,7 @@ fn codex_activity(frame: &mut Frame, area: Rect, data: &Data) {
                 .unwrap_or_else(|| "-".to_owned());
             Row::new([
                 thread.status.clone(),
-                short(
-                    thread
-                        .name
-                        .as_deref()
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or(&thread.preview),
-                    34,
-                ),
+                short(thread_label(thread), 34),
                 pressure,
                 thread.telemetry.tool_calls.to_string(),
             ])
@@ -908,13 +926,7 @@ fn changed_files(frame: &mut Frame, area: Rect, data: &Data) {
             Line::from(vec![
                 Span::styled(
                     format!("{status:>2} "),
-                    Style::default().fg(if status.contains('D') {
-                        Color::Red
-                    } else if status.contains('A') || status.contains('?') {
-                        Color::Green
-                    } else {
-                        Color::Yellow
-                    }),
+                    Style::default().fg(file_status_color(status)),
                 ),
                 Span::raw(path.clone()),
             ])
@@ -922,7 +934,11 @@ fn changed_files(frame: &mut Frame, area: Rect, data: &Data) {
         .collect::<Vec<_>>();
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Changed files").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Changed files")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -934,6 +950,7 @@ fn monitoring_page(frame: &mut Frame, area: Rect, data: &Data, monitor: &SystemS
         .constraints([Constraint::Length(7), Constraint::Min(10)])
         .split(area);
     monitoring_cards(frame, layout[0], data, monitor);
+
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
@@ -965,19 +982,24 @@ fn monitoring_cards(frame: &mut Frame, area: Rect, data: &Data, monitor: &System
         (Some(used), Some(total)) => format!("{} / {}", bytes(used), bytes(total)),
         _ => "unavailable".to_owned(),
     };
-    let token_threads = data
-        .companion
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .threads
-                .iter()
-                .filter(|thread| thread.telemetry.token_usage.is_some())
-                .count()
-        })
-        .unwrap_or_default();
-    metric_card(frame, areas[0], "Host CPU", &cpu, &monitor.platform, Color::Cyan);
-    metric_card(frame, areas[1], "Host memory", &memory, "physical RAM", Color::Magenta);
+    let token_threads = token_thread_count(data);
+
+    metric_card(
+        frame,
+        areas[0],
+        "Host CPU",
+        &cpu,
+        &monitor.platform,
+        Color::Cyan,
+    );
+    metric_card(
+        frame,
+        areas[1],
+        "Host memory",
+        &memory,
+        "physical RAM",
+        Color::Magenta,
+    );
     metric_card(
         frame,
         areas[2],
@@ -992,7 +1014,11 @@ fn monitoring_cards(frame: &mut Frame, area: Rect, data: &Data, monitor: &System
         "Token telemetry",
         &token_threads.to_string(),
         "Codex threads reporting usage",
-        if token_threads > 0 { Color::Green } else { Color::Yellow },
+        if token_threads > 0 {
+            Color::Green
+        } else {
+            Color::Yellow
+        },
     );
 }
 
@@ -1037,19 +1063,14 @@ fn monitoring_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
         .companion
         .as_ref()
         .is_some_and(|snapshot| snapshot.connected);
-    let token_threads = data
-        .companion
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .threads
-                .iter()
-                .filter(|thread| thread.telemetry.token_usage.is_some())
-                .count()
-        })
-        .unwrap_or_default();
+    let token_threads = token_thread_count(data);
     let lines = vec![
-        health_line("Session", data.meta.stopped_at.is_none(), "active", "stopped"),
+        health_line(
+            "Session",
+            data.meta.stopped_at.is_none(),
+            "active",
+            "stopped",
+        ),
         health_line("Codex companion", connected, "connected", "offline"),
         Line::raw(format!("Token sources        {token_threads}")),
         Line::raw(format!("Tracked processes    {}", monitor.processes.len())),
@@ -1070,7 +1091,11 @@ fn monitoring_health(frame: &mut Frame, area: Rect, data: &Data, monitor: &Syste
     ];
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::default().title("Monitoring health").borders(Borders::ALL))
+            .block(
+                Block::default()
+                    .title("Monitoring health")
+                    .borders(Borders::ALL),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -1091,11 +1116,16 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
         frame.render_widget(
             Paragraph::new("No Codex Companion data")
                 .style(Style::default().fg(Color::DarkGray))
-                .block(Block::default().title("Codex telemetry").borders(Borders::ALL)),
+                .block(
+                    Block::default()
+                        .title("Codex telemetry")
+                        .borders(Borders::ALL),
+                ),
             area,
         );
         return;
     };
+
     let rows = snapshot
         .threads
         .iter()
@@ -1114,14 +1144,7 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
                 .map(|value| format!("{value}%"))
                 .unwrap_or_else(|| "-".to_owned());
             Row::new([
-                short(
-                    thread
-                        .name
-                        .as_deref()
-                        .filter(|name| !name.trim().is_empty())
-                        .unwrap_or(&thread.preview),
-                    30,
-                ),
+                short(thread_label(thread), 30),
                 pressure,
                 tokens,
                 cache,
@@ -1141,9 +1164,15 @@ fn codex_telemetry_table(frame: &mut Frame, area: Rect, data: &Data) {
                 Constraint::Length(8),
             ],
         )
-        .header(Row::new(["Thread", "Context", "Tokens", "Cache", "Tools", "Compact"]))
+        .header(Row::new([
+            "Thread", "Context", "Tokens", "Cache", "Tools", "Compact",
+        ]))
         .column_spacing(1)
-        .block(Block::default().title("Codex telemetry").borders(Borders::ALL)),
+        .block(
+            Block::default()
+                .title("Codex telemetry")
+                .borders(Borders::ALL),
+        ),
         area,
     );
 }
@@ -1166,22 +1195,15 @@ fn selected_run<'a>(data: &'a Data, ui: &UiState) -> Option<&'a AgentRun> {
     data.runs.get(ui.selected_run)
 }
 
-fn filtered_output_count(data: &Data, ui: &UiState) -> usize {
-    let selected = selected_run(data, ui).map(|run| run.id.as_str());
-    data.output
-        .iter()
-        .filter(|record| ui.show_all_output || selected.is_none() || selected == Some(record.run_id.as_str()))
-        .count()
-}
-
 fn output_panel(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let selected = selected_run(data, ui).map(|run| run.id.as_str());
     let records = data
         .output
         .iter()
         .rev()
-        .filter(|record| ui.show_all_output || selected.is_none() || selected == Some(record.run_id.as_str()))
-        .skip(ui.output_scroll)
+        .filter(|record| {
+            ui.show_all_output || selected.is_none() || selected == Some(record.run_id.as_str())
+        })
         .take(area.height.saturating_sub(2) as usize)
         .map(|record| {
             Line::from(vec![
@@ -1226,30 +1248,40 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         );
         return;
     };
+
     let (status, color) = run_status(run.status);
+    let ended = run
+        .ended_at
+        .map(|value| value.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| "running".to_owned());
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(status, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                status,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::raw(format!("  {}", run.provider)),
         ]),
         Line::raw(format!("Run ID: {}", run.id)),
         Line::raw(format!("Started: {}", run.started.format("%H:%M:%S"))),
+        Line::raw(format!("Ended: {ended}")),
         Line::raw(format!("Duration: {}", run_duration(run))),
-        Line::raw(format!(
-            "Model: {}",
-            run.model.as_deref().unwrap_or("-")
-        )),
+        Line::raw(format!("Model: {}", run.model.as_deref().unwrap_or("-"))),
         Line::raw(format!(
             "Exit: {}",
             run.exit_code
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "-".to_owned())
         )),
-        Line::raw(format!("Policy: {}", run.risk.as_deref().unwrap_or("allow"))),
+        Line::raw(format!(
+            "Policy: {}",
+            run.risk.as_deref().unwrap_or("allow")
+        )),
         Line::raw(""),
         Line::styled("Command", Style::default().fg(Color::DarkGray)),
         Line::raw(run.command.clone()),
     ];
+
     if let Some(info) = &run.companion {
         lines.extend([
             Line::raw(""),
@@ -1258,47 +1290,13 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
             Line::raw(format!("Thread: {}", info.thread_id)),
             Line::raw(format!("Turn: {}", info.turn_id)),
         ]);
-        if let Some(thread) = data
-            .companion
-            .as_ref()
-            .and_then(|snapshot| snapshot.threads.iter().find(|thread| thread.id == info.thread_id))
-        {
-            let telemetry = &thread.telemetry;
-            lines.push(Line::raw(""));
-            lines.push(Line::styled(
-                "Context / Efficiency",
-                Style::default().fg(Color::Magenta),
-            ));
-            if let Some(usage) = &telemetry.token_usage {
-                let pressure = context_pressure_percent(usage)
-                    .map(|value| format!("{value}%"))
-                    .unwrap_or_else(|| "-".to_owned());
-                lines.push(Line::raw(format!("Context pressure: {pressure}")));
-                lines.push(Line::raw(format!(
-                    "Input: {}  Cached: {} ({}%)",
-                    format_token_count(usage.last.input_tokens),
-                    format_token_count(usage.last.cached_input_tokens),
-                    token_percent(usage.last.cached_input_tokens, usage.last.input_tokens)
-                )));
-                lines.push(Line::raw(format!(
-                    "Output: {}  Reasoning: {}",
-                    format_token_count(usage.last.output_tokens),
-                    format_token_count(usage.last.reasoning_output_tokens)
-                )));
-            } else {
-                lines.push(Line::styled(
-                    "No persisted token_count yet",
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            lines.push(Line::raw(format!(
-                "Tools: {}  Failed: {}  Repeated: {}",
-                telemetry.tool_calls, telemetry.failed_items, telemetry.repeated_items
-            )));
-            lines.push(Line::raw(format!(
-                "Compactions: {}  Subagents: {}",
-                telemetry.compactions, telemetry.subagent_calls
-            )));
+        if let Some(thread) = data.companion.as_ref().and_then(|snapshot| {
+            snapshot
+                .threads
+                .iter()
+                .find(|thread| thread.id == info.thread_id)
+        }) {
+            append_companion_details(&mut lines, &thread.telemetry);
         }
     } else {
         lines.extend([
@@ -1306,12 +1304,51 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
             Line::styled("Press d for Run Diff", Style::default().fg(Color::Cyan)),
         ]);
     }
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().title("Run details").borders(Borders::ALL))
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn append_companion_details(lines: &mut Vec<Line<'static>>, telemetry: &companion::CompanionTelemetry) {
+    lines.push(Line::raw(""));
+    lines.push(Line::styled(
+        "Context / Efficiency",
+        Style::default().fg(Color::Magenta),
+    ));
+    if let Some(usage) = &telemetry.token_usage {
+        let pressure = context_pressure_percent(usage)
+            .map(|value| format!("{value}%"))
+            .unwrap_or_else(|| "-".to_owned());
+        lines.push(Line::raw(format!("Context pressure: {pressure}")));
+        lines.push(Line::raw(format!(
+            "Input: {}  Cached: {} ({}%)",
+            format_token_count(usage.last.input_tokens),
+            format_token_count(usage.last.cached_input_tokens),
+            token_percent(usage.last.cached_input_tokens, usage.last.input_tokens)
+        )));
+        lines.push(Line::raw(format!(
+            "Output: {}  Reasoning: {}",
+            format_token_count(usage.last.output_tokens),
+            format_token_count(usage.last.reasoning_output_tokens)
+        )));
+    } else {
+        lines.push(Line::styled(
+            "No persisted token_count yet",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    lines.push(Line::raw(format!(
+        "Tools: {}  Failed: {}  Repeated: {}",
+        telemetry.tool_calls, telemetry.failed_items, telemetry.repeated_items
+    )));
+    lines.push(Line::raw(format!(
+        "Compactions: {}  Subagents: {}",
+        telemetry.compactions, telemetry.subagent_calls
+    )));
 }
 
 fn footer(frame: &mut Frame, area: Rect, ui: &UiState) {
@@ -1386,7 +1423,11 @@ fn approval_overlay(frame: &mut Frame, request: &ApprovalRequest, pending: usize
 fn draw_diff(frame: &mut Frame, data: &Data, ui: &UiState, view: &RunDiffView) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(5),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
     header(frame, layout[0], data);
     let lines = diff_lines(view)
@@ -1426,6 +1467,7 @@ fn diff_lines(view: &RunDiffView) -> Vec<Line<'static>> {
             Style::default().fg(Color::DarkGray),
         )];
     };
+
     let mut lines = vec![Line::from(vec![
         Span::styled(
             format!("+{}", diff.meta.added),
@@ -1470,6 +1512,27 @@ fn companion_state(data: &Data) -> &'static str {
     }
 }
 
+fn token_thread_count(data: &Data) -> usize {
+    data.companion
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .threads
+                .iter()
+                .filter(|thread| thread.telemetry.token_usage.is_some())
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn thread_label(thread: &companion::CompanionThread) -> &str {
+    thread
+        .name
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(&thread.preview)
+}
+
 fn run_status(status: RunStatus) -> (&'static str, Color) {
     match status {
         RunStatus::Running => ("● Running", Color::Green),
@@ -1482,6 +1545,16 @@ fn run_duration(run: &AgentRun) -> String {
     run.duration_ms
         .map(duration)
         .unwrap_or_else(|| live_duration(run.started))
+}
+
+fn file_status_color(status: &str) -> Color {
+    if status.contains('D') {
+        Color::Red
+    } else if status.contains('A') || status.contains('?') {
+        Color::Green
+    } else {
+        Color::Yellow
+    }
 }
 
 fn event_color(event: &SessionEvent) -> Color {
