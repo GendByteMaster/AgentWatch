@@ -1226,11 +1226,7 @@ fn context_efficiency(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) 
 }
 
 fn integer_percent(part: usize, total: usize) -> usize {
-    if total == 0 {
-        0
-    } else {
-        part.saturating_mul(100) / total
-    }
+    part.saturating_mul(100).checked_div(total).unwrap_or(0)
 }
 
 fn telemetry_health(telemetry: &companion::CompanionTelemetry) -> (&'static str, Color) {
