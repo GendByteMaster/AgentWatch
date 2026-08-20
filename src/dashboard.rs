@@ -216,6 +216,19 @@ impl UiState {
             return;
         };
 
+        if run.companion.is_some() {
+            self.diff_view = Some(RunDiffView {
+                run_id: run.id.clone(),
+                diff: None,
+                message: Some(
+                    "Run Diff is not persisted for read-only Codex Companion turns yet."
+                        .to_owned(),
+                ),
+            });
+            self.diff_scroll = 0;
+            return;
+        }
+
         let (diff, message) = match run_diff::load(root, &run.id) {
             Ok(Some(diff)) => (Some(diff), None),
             Ok(None) => (
@@ -249,6 +262,15 @@ impl UiState {
 }
 
 #[derive(Debug, Clone)]
+struct CompanionRunMeta {
+    thread_id: String,
+    turn_id: String,
+    source: String,
+    tool_count: usize,
+    recent_items: Vec<companion::CompanionItem>,
+}
+
+#[derive(Debug, Clone)]
 struct AgentRun {
     id: String,
     provider: String,
@@ -260,6 +282,7 @@ struct AgentRun {
     duration_ms: Option<u64>,
     exit_code: Option<i32>,
     risk: Option<String>,
+    companion: Option<CompanionRunMeta>,
 }
 
 #[derive(Debug, Default)]
@@ -413,12 +436,12 @@ fn load(root: &Path) -> Result<Data> {
     let approvals = approval_ipc::read_pending(root)?;
     let events = read_events(root)?;
     let output = output::read_tail(root, &meta.started_at, output::DEFAULT_TAIL_BYTES)?;
-    let runs = aggregate_runs(&events);
     let git = git_info(root);
     let (companion, companion_error) = match companion::load_snapshot(root) {
         Ok(snapshot) => (snapshot, None),
         Err(error) => (None, Some(error.to_string())),
     };
+    let runs = aggregate_runs(&events, companion.as_ref());
 
     Ok(Data {
         meta,
@@ -450,7 +473,7 @@ fn read_events(root: &Path) -> Result<Vec<SessionEvent>> {
     Ok(events)
 }
 
-fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
+fn aggregate_runs(events: &[SessionEvent], companion: Option<&CompanionSnapshot>) -> Vec<AgentRun> {
     let mut runs: BTreeMap<String, AgentRun> = BTreeMap::new();
 
     for event in events
@@ -472,6 +495,7 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
             duration_ms: None,
             exit_code: None,
             risk: event.risk.clone(),
+            companion: None,
         });
 
         if let Some(provider) = &event.provider {
@@ -511,9 +535,107 @@ fn aggregate_runs(events: &[SessionEvent]) -> Vec<AgentRun> {
         }
     }
 
+    if let Some(snapshot) = companion {
+        merge_companion_runs(&mut runs, events, snapshot);
+    }
+
     let mut runs: Vec<_> = runs.into_values().collect();
     runs.sort_by_key(|run| std::cmp::Reverse(run.started));
     runs
+}
+
+fn merge_companion_runs(
+    runs: &mut BTreeMap<String, AgentRun>,
+    events: &[SessionEvent],
+    snapshot: &CompanionSnapshot,
+) {
+    for thread in &snapshot.threads {
+        let Some(turn) = thread.latest_turn.as_ref() else {
+            continue;
+        };
+        let Some(status) = companion_run_status(&turn.status) else {
+            continue;
+        };
+        let id = format!("codex:{}:{}", thread.id, turn.id);
+        if runs.contains_key(&id) {
+            continue;
+        }
+
+        let started = turn
+            .started_at
+            .and_then(unix_datetime)
+            .or_else(|| unix_datetime(thread.created_at))
+            .or_else(|| unix_datetime(thread.updated_at))
+            .unwrap_or(snapshot.last_poll);
+        let ended_at = if matches!(status, RunStatus::Running) {
+            None
+        } else {
+            turn.completed_at
+                .and_then(unix_datetime)
+                .or_else(|| unix_datetime(thread.updated_at))
+        };
+        let duration_ms = turn.duration_ms.or_else(|| {
+            ended_at.and_then(|ended| {
+                u64::try_from(ended.signed_duration_since(started).num_milliseconds()).ok()
+            })
+        });
+        let exit_code = match status {
+            RunStatus::Running => None,
+            RunStatus::Completed => Some(0),
+            RunStatus::Failed => Some(1),
+        };
+        let risk = events
+            .iter()
+            .rev()
+            .filter(|event| event.run_id.as_deref() == Some(id.as_str()))
+            .find_map(|event| event.risk.clone());
+        let label = thread
+            .name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| (!thread.preview.trim().is_empty()).then_some(thread.preview.as_str()))
+            .unwrap_or(thread.id.as_str())
+            .to_owned();
+
+        runs.insert(
+            id.clone(),
+            AgentRun {
+                id,
+                provider: "codex-desktop".to_owned(),
+                model: None,
+                command: label,
+                started,
+                ended_at,
+                status,
+                duration_ms,
+                exit_code,
+                risk,
+                companion: Some(CompanionRunMeta {
+                    thread_id: thread.id.clone(),
+                    turn_id: turn.id.clone(),
+                    source: thread.source.clone(),
+                    tool_count: turn.item_count,
+                    recent_items: thread.recent_items.clone(),
+                }),
+            },
+        );
+    }
+}
+
+fn companion_run_status(status: &str) -> Option<RunStatus> {
+    match status {
+        "inProgress" | "running" => Some(RunStatus::Running),
+        "completed" => Some(RunStatus::Completed),
+        "failed" | "interrupted" | "cancelled" | "canceled" => Some(RunStatus::Failed),
+        _ => None,
+    }
+}
+
+fn unix_datetime(timestamp: i64) -> Option<DateTime<Utc>> {
+    if timestamp <= 0 {
+        return None;
+    }
+    DateTime::<Utc>::from_timestamp(timestamp, 0)
 }
 
 fn git_info(root: &Path) -> GitInfo {
@@ -746,6 +868,17 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
         .iter()
         .filter(|run| matches!(run.status, RunStatus::Failed))
         .count();
+    let companion_runs = data
+        .runs
+        .iter()
+        .filter(|run| run.companion.is_some())
+        .count();
+    let companion_state = match &data.companion {
+        Some(snapshot) if snapshot.connected => "connected",
+        Some(_) => "disconnected",
+        None if data.companion_error.is_some() => "error",
+        None => "offline",
+    };
 
     card(
         frame,
@@ -808,6 +941,14 @@ fn cards(frame: &mut Frame, area: Rect, data: &Data) {
             Line::styled(
                 format!("Failed: {failed_runs}"),
                 status_color(failed_runs == 0),
+            ),
+            Line::styled(
+                format!("Codex: {companion_runs} {companion_state}"),
+                Style::default().fg(if companion_state == "connected" {
+                    Color::Green
+                } else {
+                    Color::Yellow
+                }),
             ),
         ],
     );
@@ -1052,10 +1193,10 @@ fn agents(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         });
 
     let title = if data.runs.is_empty() {
-        "Agents (live) — no runs".to_owned()
+        "Agents / Turns (live) — no runs".to_owned()
     } else {
         format!(
-            "Agents (live) — selected {}/{}",
+            "Agents / Turns (live) — selected {}/{}",
             ui.selected_run + 1,
             data.runs.len()
         )
@@ -1066,7 +1207,7 @@ fn agents(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
             rows,
             [
                 Constraint::Length(12),
-                Constraint::Length(12),
+                Constraint::Length(14),
                 Constraint::Length(15),
                 Constraint::Min(22),
                 Constraint::Length(9),
@@ -1155,6 +1296,7 @@ fn recent(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
 fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
     let limit = area.height.saturating_sub(2) as usize;
     let selected = selected_run_id(data, ui);
+    let companion_selected = selected_run(data, ui).is_some_and(|run| run.companion.is_some());
     let records = data
         .output
         .iter()
@@ -1168,6 +1310,8 @@ fn tail(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
         vec![Line::styled(
             if ui.show_all_output || selected.is_none() {
                 "No captured agent output yet"
+            } else if companion_selected {
+                "Read-only Codex Companion does not mirror stdout; use Recent Events and Run Details"
             } else {
                 "No captured output for selected run"
             },
@@ -1304,13 +1448,65 @@ fn run_details(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
             Span::styled(policy, policy_style),
         ]),
         Line::raw(format!("Command: {}", run.command)),
+    ];
+
+    if let Some(info) = &run.companion {
+        lines.extend([
+            Line::raw(format!("Source: {}", info.source)),
+            Line::raw(format!("Thread: {}", info.thread_id)),
+            Line::raw(format!("Turn: {}", info.turn_id)),
+            Line::raw(format!("Tools observed: {}", info.tool_count)),
+            Line::styled(
+                "Read-only observation: stdout and Run Diff are not persisted",
+                Style::default().fg(Color::Cyan),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "Recent observed activity",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]);
+
+        let item_limit = area.height.saturating_sub(19) as usize;
+        if info.recent_items.is_empty() {
+            lines.push(Line::styled(
+                "  no recent tool activity",
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            for item in info.recent_items.iter().take(item_limit) {
+                lines.push(Line::raw(format!(
+                    "  {:<8} {:<10} {}",
+                    item.kind,
+                    item.status,
+                    short(&item.detail, 46)
+                )));
+            }
+            if info.recent_items.len() > item_limit {
+                lines.push(Line::styled(
+                    format!("  +{} more", info.recent_items.len() - item_limit),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(Block::default().title("Run Details").borders(Borders::ALL))
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    lines.extend([
         Line::styled("Press d to open Run Diff", Style::default().fg(Color::Cyan)),
         Line::raw(""),
         Line::styled(
             "Files attributed to run",
             Style::default().fg(Color::DarkGray),
         ),
-    ];
+    ]);
 
     let file_limit = area.height.saturating_sub(15) as usize;
     if attributed_files.is_empty() {
@@ -1581,5 +1777,34 @@ fn bytes(value: u64) -> String {
         format!("{:.1} KB", value as f64 / 1024.0)
     } else {
         format!("{value} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunStatus, companion_run_status, unix_datetime};
+
+    #[test]
+    fn maps_companion_turn_statuses() {
+        assert!(matches!(
+            companion_run_status("inProgress"),
+            Some(RunStatus::Running)
+        ));
+        assert!(matches!(
+            companion_run_status("completed"),
+            Some(RunStatus::Completed)
+        ));
+        assert!(matches!(
+            companion_run_status("interrupted"),
+            Some(RunStatus::Failed)
+        ));
+        assert!(companion_run_status("unknown").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_companion_timestamps() {
+        assert!(unix_datetime(0).is_none());
+        assert!(unix_datetime(-1).is_none());
+        assert!(unix_datetime(1).is_some());
     }
 }
