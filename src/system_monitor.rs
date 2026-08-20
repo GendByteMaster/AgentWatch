@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
+#[cfg(target_os = "windows")]
+use serde_json::Value;
 #[cfg(target_os = "linux")]
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::process::Command;
-#[cfg(target_os = "windows")]
-use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
 pub struct SystemSnapshot {
@@ -109,7 +109,13 @@ $processes = @(
 "#;
 
     let output = Command::new("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
         .output()
         .map_err(|error| format!("failed to start PowerShell monitor: {error}"))?;
     if !output.status.success() {
@@ -255,7 +261,10 @@ fn read_linux_processes() -> Vec<ProcessSnapshot> {
         .filter_map(|entry| {
             let pid = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
             let base = entry.path();
-            let name = fs::read_to_string(base.join("comm")).ok()?.trim().to_owned();
+            let name = fs::read_to_string(base.join("comm"))
+                .ok()?
+                .trim()
+                .to_owned();
             let lower = name.to_ascii_lowercase();
             if !lower.starts_with("codex") && !lower.starts_with("agentwatch") {
                 return None;
