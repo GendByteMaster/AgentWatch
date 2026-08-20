@@ -344,9 +344,9 @@ fn collect_snapshot(_monitor: &mut SystemMonitor) -> Result<SystemSnapshot, Stri
 mod tests {
     use std::collections::VecDeque;
 
-    use super::{HISTORY_LIMIT, SystemSnapshot, memory_percent, push_sample};
     #[cfg(target_os = "linux")]
     use super::parse_kib;
+    use super::{HISTORY_LIMIT, SystemSnapshot, memory_percent, push_sample};
 
     #[test]
     fn caps_resource_history() {
