@@ -36,3 +36,9 @@ deny = [
   "rm -rf /*",
   "format c:",
 ]
+
+# Approval Gate settings for supported AgentWatch-controlled providers.
+# Warn decisions require human confirmation while enabled.
+[approvals]
+enabled = true
+timeout_seconds = 600
