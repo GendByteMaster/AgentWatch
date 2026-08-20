@@ -20,13 +20,15 @@ mod windows {
         collections::BTreeSet,
         env,
         ffi::OsString,
+        fs,
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, Stdio},
     };
 
     use anyhow::{Context, Result, bail};
 
     const CODEX_OVERRIDE: &str = "AGENTWATCH_CODEX_BIN";
+    const CODEX_CLI_PATH: &str = "CODEX_CLI_PATH";
 
     pub(super) fn prepare_environment() -> Result<Option<PathBuf>> {
         if let Some(path) = explicit_override()? {
@@ -34,11 +36,24 @@ mod windows {
             return Ok(Some(path));
         }
 
-        let mut candidates = BTreeSet::new();
+        // Keep candidate priority deterministic. In particular, do not put paths in a
+        // BTreeSet before validation: a protected MSIX path under Program Files sorts
+        // before a usable per-user CLI path and can therefore win accidentally.
+        let mut candidates = Vec::new();
         let mut npm_roots = BTreeSet::new();
 
-        for path in where_paths("codex.exe") {
-            candidates.insert(path);
+        candidates.extend(where_paths("codex.exe"));
+
+        if let Some(path) = env::var_os(CODEX_CLI_PATH) {
+            candidates.push(PathBuf::from(path));
+        }
+
+        if let Some(local_appdata) = env::var_os("LOCALAPPDATA") {
+            let root = PathBuf::from(local_appdata)
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin");
+            candidates.extend(local_codex_candidates(&root));
         }
 
         for path in where_paths("codex") {
@@ -58,17 +73,44 @@ mod windows {
             candidates.extend(npm_native_candidates(&root));
         }
 
-        candidates.extend(running_codex_paths());
+        let mut seen = BTreeSet::new();
+        let mut rejected = Vec::new();
 
-        if let Some(path) = candidates
-            .into_iter()
-            .find(|path| is_codex_executable(path))
-        {
+        for path in candidates {
+            if !seen.insert(path.clone()) || !is_codex_executable(&path) {
+                continue;
+            }
+
+            if is_protected_windows_apps_binary(&path) {
+                rejected.push(format!(
+                    "{} (protected Codex Desktop MSIX binary)",
+                    path.display()
+                ));
+                continue;
+            }
+
+            if !is_launchable_codex(&path) {
+                rejected.push(format!(
+                    "{} (`--version` launch probe failed)",
+                    path.display()
+                ));
+                continue;
+            }
+
             activate(&path)?;
             return Ok(Some(path));
         }
 
-        Ok(None)
+        if !rejected.is_empty() {
+            bail!(
+                "Codex was found, but no launchable native CLI is available. Ignored candidates:\n  - {}\nInstall the standalone Codex CLI or set {CODEX_OVERRIDE} to a launchable codex.exe outside the protected Program Files\\WindowsApps package.",
+                rejected.join("\n  - ")
+            );
+        }
+
+        bail!(
+            "no launchable native Codex CLI found; install Codex CLI or set {CODEX_OVERRIDE} to its codex.exe path"
+        )
     }
 
     fn explicit_override() -> Result<Option<PathBuf>> {
@@ -85,6 +127,18 @@ mod windows {
         if !is_codex_executable(&path) {
             bail!(
                 "{CODEX_OVERRIDE} must point to the native `codex.exe` binary; got `{}`",
+                path.display()
+            );
+        }
+        if is_protected_windows_apps_binary(&path) {
+            bail!(
+                "{CODEX_OVERRIDE} points to protected Codex Desktop MSIX binary `{}`; use a standalone launchable codex.exe instead",
+                path.display()
+            );
+        }
+        if !is_launchable_codex(&path) {
+            bail!(
+                "{CODEX_OVERRIDE} points to `{}`, but AgentWatch cannot launch it with `--version`",
                 path.display()
             );
         }
@@ -121,20 +175,6 @@ mod windows {
         lines_to_paths(&output.stdout)
     }
 
-    fn running_codex_paths() -> Vec<PathBuf> {
-        let script = "Get-Process -Name codex -ErrorAction SilentlyContinue | ForEach-Object { $_.Path } | Select-Object -Unique";
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .output();
-        let Ok(output) = output else {
-            return Vec::new();
-        };
-        if !output.status.success() {
-            return Vec::new();
-        }
-        lines_to_paths(&output.stdout)
-    }
-
     fn lines_to_paths(bytes: &[u8]) -> Vec<PathBuf> {
         String::from_utf8_lossy(bytes)
             .lines()
@@ -142,6 +182,27 @@ mod windows {
             .filter(|line| !line.is_empty())
             .map(PathBuf::from)
             .collect()
+    }
+
+    fn local_codex_candidates(root: &Path) -> Vec<PathBuf> {
+        let mut candidates = vec![root.join("codex.exe")];
+
+        if let Ok(entries) = fs::read_dir(root) {
+            candidates.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .map(|path| path.join("codex.exe")),
+            );
+        }
+
+        // Codex Desktop cache directories are content/version hashed. Prefer the most
+        // recently updated executable, while still probing every candidate before use.
+        candidates.sort_by_key(|path| {
+            std::cmp::Reverse(path.metadata().and_then(|meta| meta.modified()).ok())
+        });
+        candidates
     }
 
     fn npm_native_candidates(root: &Path) -> Vec<PathBuf> {
@@ -188,9 +249,36 @@ mod windows {
                 .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("codex.exe"))
     }
 
+    fn is_protected_windows_apps_binary(path: &Path) -> bool {
+        if let Some(program_files) = env::var_os("ProgramFiles") {
+            let protected_root = PathBuf::from(program_files).join("WindowsApps");
+            if path.starts_with(protected_root) {
+                return true;
+            }
+        }
+
+        let normalized = path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_ascii_lowercase();
+        normalized.contains("\\program files\\windowsapps\\")
+    }
+
+    fn is_launchable_codex(path: &Path) -> bool {
+        Command::new(path)
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::npm_native_candidates;
+        use super::{
+            is_protected_windows_apps_binary, local_codex_candidates, npm_native_candidates,
+        };
         use std::path::Path;
 
         #[test]
@@ -202,6 +290,30 @@ mod windows {
                     && rendered.contains("codex-win32")
                     && rendered.ends_with(r"bin\codex.exe")
             }));
+        }
+
+        #[test]
+        fn local_codex_cache_includes_direct_binary_candidate() {
+            let root = Path::new(r"C:\Users\dev\AppData\Local\OpenAI\Codex\bin");
+            let candidates = local_codex_candidates(root);
+            assert!(candidates.iter().any(|path| {
+                path.to_string_lossy()
+                    .ends_with(r"OpenAI\Codex\bin\codex.exe")
+            }));
+        }
+
+        #[test]
+        fn protected_codex_desktop_msix_binary_is_rejected() {
+            assert!(is_protected_windows_apps_binary(Path::new(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.814.5517.0_x64__2p2nqsd0c76g0\app\resources\codex.exe"
+            )));
+        }
+
+        #[test]
+        fn per_user_windowsapps_alias_is_not_rejected() {
+            assert!(!is_protected_windows_apps_binary(Path::new(
+                r"C:\Users\dev\AppData\Local\Microsoft\WindowsApps\codex.exe"
+            )));
         }
     }
 }
