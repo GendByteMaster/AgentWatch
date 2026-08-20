@@ -82,12 +82,18 @@ mod windows {
             }
 
             if is_protected_windows_apps_binary(&path) {
-                rejected.push(format!("{} (protected Codex Desktop MSIX binary)", path.display()));
+                rejected.push(format!(
+                    "{} (protected Codex Desktop MSIX binary)",
+                    path.display()
+                ));
                 continue;
             }
 
             if !is_launchable_codex(&path) {
-                rejected.push(format!("{} (`--version` launch probe failed)", path.display()));
+                rejected.push(format!(
+                    "{} (`--version` launch probe failed)",
+                    path.display()
+                ));
                 continue;
             }
 
