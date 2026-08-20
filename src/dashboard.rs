@@ -1122,16 +1122,128 @@ fn body(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
             Constraint::Percentage(30),
         ])
         .split(columns[0]);
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-        .split(columns[1]);
 
     agents(frame, left[0], data, ui);
     recent(frame, left[1], data, ui);
     tail(frame, left[2], data, ui);
-    files(frame, right[0], data);
-    run_details(frame, right[1], data, ui);
+
+    if selected_companion_telemetry(data, ui).is_some() {
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(24),
+                Constraint::Percentage(34),
+                Constraint::Percentage(42),
+            ])
+            .split(columns[1]);
+        files(frame, right[0], data);
+        context_efficiency(frame, right[1], data, ui);
+        run_details(frame, right[2], data, ui);
+    } else {
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+            .split(columns[1]);
+        files(frame, right[0], data);
+        run_details(frame, right[1], data, ui);
+    }
+}
+
+fn selected_companion_telemetry<'a>(
+    data: &'a Data,
+    ui: &UiState,
+) -> Option<&'a companion::CompanionTelemetry> {
+    let info = selected_run(data, ui)?.companion.as_ref()?;
+    data.companion
+        .as_ref()?
+        .threads
+        .iter()
+        .find(|thread| thread.id == info.thread_id)
+        .map(|thread| &thread.telemetry)
+}
+
+fn context_efficiency(frame: &mut Frame, area: Rect, data: &Data, ui: &UiState) {
+    let Some(telemetry) = selected_companion_telemetry(data, ui) else {
+        return;
+    };
+
+    let repeat_percent = integer_percent(telemetry.repeated_items, telemetry.tool_calls);
+    let failure_percent = integer_percent(telemetry.failed_items, telemetry.total_items);
+    let (health, health_color) = telemetry_health(telemetry);
+    let last_compaction = telemetry
+        .last_compaction_at
+        .map(unix_clock)
+        .unwrap_or_else(|| "-".to_owned());
+
+    let lines = vec![
+        Line::from(vec![
+            Span::raw("Observed health: "),
+            Span::styled(
+                health,
+                Style::default()
+                    .fg(health_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(format!(
+            "Tools: {}   Failed: {} ({}%)   Repeated: {} ({}%)",
+            telemetry.tool_calls,
+            telemetry.failed_items,
+            failure_percent,
+            telemetry.repeated_items,
+            repeat_percent
+        )),
+        Line::raw(format!(
+            "Compactions: {}   Last: {}",
+            telemetry.compactions, last_compaction
+        )),
+        Line::raw(format!("Subagents: {}", telemetry.subagent_calls)),
+        Line::raw(format!(
+            "Shell: {}   Files: {}",
+            telemetry.shell_calls, telemetry.file_changes
+        )),
+        Line::raw(format!(
+            "MCP: {}   Web: {}",
+            telemetry.mcp_calls, telemetry.web_searches
+        )),
+        Line::styled(
+            "Token context: pending safe live-usage source",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title("Context / Efficiency")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(health_color)),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn integer_percent(part: usize, total: usize) -> usize {
+    part.saturating_mul(100).checked_div(total).unwrap_or(0)
+}
+
+fn telemetry_health(telemetry: &companion::CompanionTelemetry) -> (&'static str, Color) {
+    if telemetry.tool_calls == 0 && telemetry.total_items == 0 {
+        return ("idle", Color::DarkGray);
+    }
+
+    let repeat_percent = integer_percent(telemetry.repeated_items, telemetry.tool_calls);
+    let failure_percent = integer_percent(telemetry.failed_items, telemetry.total_items);
+
+    if failure_percent >= 20 || repeat_percent >= 30 {
+        ("noisy", Color::Red)
+    } else if telemetry.failed_items > 0 || repeat_percent >= 15 {
+        ("watch", Color::Yellow)
+    } else {
+        ("healthy", Color::Green)
+    }
 }
 
 fn split(area: Rect) -> std::rc::Rc<[Rect]> {
