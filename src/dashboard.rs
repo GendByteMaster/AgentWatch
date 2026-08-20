@@ -1984,9 +1984,7 @@ mod tests {
         RunStatus, companion_run_status, context_pressure_percent, format_token_count,
         unix_datetime,
     };
-    use crate::companion::{
-        CompanionTokenUsage, CompanionTokenUsageBreakdown,
-    };
+    use crate::companion::{CompanionTokenUsage, CompanionTokenUsageBreakdown};
 
     #[test]
     fn maps_companion_turn_statuses() {
