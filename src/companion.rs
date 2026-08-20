@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     thread,
@@ -24,6 +24,7 @@ const MIN_INTERVAL_MS: u64 = 500;
 const MAX_INTERVAL_MS: u64 = 60_000;
 const MAX_THREADS: u32 = 100;
 const RECENT_ITEMS_PER_THREAD: usize = 8;
+const TOKEN_USAGE_SCAN_CHUNK_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompanionSnapshot {
@@ -78,6 +79,28 @@ pub struct CompanionTelemetry {
     pub last_compaction_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_compaction_turn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_usage: Option<CompanionTokenUsage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionTokenUsage {
+    pub total: CompanionTokenUsageBreakdown,
+    pub last: CompanionTokenUsageBreakdown,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_context_window: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionTokenUsageBreakdown {
+    pub total_tokens: i64,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+    pub cache_write_input_tokens: i64,
+    pub output_tokens: i64,
+    pub reasoning_output_tokens: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +119,7 @@ struct ThreadObservation {
     source: String,
     created_at: i64,
     updated_at: i64,
+    token_usage: Option<CompanionTokenUsage>,
     turns: Vec<TurnObservation>,
 }
 
@@ -154,7 +178,7 @@ pub fn watch(root: &Path, interval_ms: u64, thread_limit: u32) -> Result<()> {
 
     println!("AgentWatch Codex Companion active");
     println!("Repository: {canonical_root}");
-    println!("Mode: read-only thread/list + thread/read");
+    println!("Mode: read-only thread/list + thread/read + persisted token telemetry");
     println!("Poll: {interval_ms}ms, recent threads: {thread_limit}");
     if let Some(snapshot) = previous_snapshot {
         println!(
@@ -276,7 +300,12 @@ fn poll(
             match client.request("thread/read", json!({"threadId": id, "includeTurns": true})) {
                 Ok(read) => {
                     if let Some(thread) = read.get("thread") {
-                        observations.push(parse_thread(thread)?);
+                        let mut observation = parse_thread(thread)?;
+                        if observation.token_usage.is_none() {
+                            observation.token_usage =
+                                known.get(id).and_then(|previous| previous.token_usage.clone());
+                        }
+                        observations.push(observation);
                         continue;
                     }
                     eprintln!(
@@ -486,6 +515,18 @@ fn parse_thread(value: &Value) -> Result<ThreadObservation> {
         .map(|turns| turns.iter().map(parse_turn).collect::<Result<Vec<_>>>())
         .transpose()?
         .unwrap_or_default();
+    let token_usage = value
+        .get("path")
+        .and_then(Value::as_str)
+        .and_then(|path| match read_latest_token_usage(Path::new(path)) {
+            Ok(usage) => usage,
+            Err(error) => {
+                eprintln!(
+                    "AgentWatch companion warning: failed to read persisted token usage for {id}: {error}"
+                );
+                None
+            }
+        });
 
     Ok(ThreadObservation {
         id,
@@ -505,8 +546,131 @@ fn parse_thread(value: &Value) -> Result<ThreadObservation> {
             .get("updatedAt")
             .and_then(Value::as_i64)
             .unwrap_or_default(),
+        token_usage,
         turns,
     })
+}
+
+fn read_latest_token_usage(path: &Path) -> Result<Option<CompanionTokenUsage>> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("failed to open Codex rollout {}", path.display()))?;
+    let mut end = file
+        .metadata()
+        .with_context(|| format!("failed to stat Codex rollout {}", path.display()))?
+        .len();
+    let mut carry = Vec::new();
+
+    while end > 0 {
+        let start = end.saturating_sub(TOKEN_USAGE_SCAN_CHUNK_BYTES);
+        let chunk_len = usize::try_from(end - start).context("Codex rollout chunk is too large")?;
+        file.seek(SeekFrom::Start(start))
+            .with_context(|| format!("failed to seek Codex rollout {}", path.display()))?;
+        let mut chunk = vec![0_u8; chunk_len];
+        file.read_exact(&mut chunk)
+            .with_context(|| format!("failed to read Codex rollout {}", path.display()))?;
+        chunk.extend_from_slice(&carry);
+
+        let mut lines = chunk.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+        if start > 0 {
+            carry = lines.first().copied().unwrap_or_default().to_vec();
+            if !lines.is_empty() {
+                lines.remove(0);
+            }
+        } else {
+            carry.clear();
+        }
+
+        for line in lines.into_iter().rev() {
+            if line.is_empty() {
+                continue;
+            }
+            let Ok(value) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            if let Some(usage) = parse_persisted_token_usage(&value) {
+                return Ok(Some(usage));
+            }
+        }
+
+        end = start;
+    }
+
+    if !carry.is_empty()
+        && let Ok(value) = serde_json::from_slice::<Value>(&carry)
+    {
+        return Ok(parse_persisted_token_usage(&value));
+    }
+
+    Ok(None)
+}
+
+fn parse_persisted_token_usage(value: &Value) -> Option<CompanionTokenUsage> {
+    if value.get("type")?.as_str()? != "event_msg" {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    if payload.get("type")?.as_str()? != "token_count" {
+        return None;
+    }
+    let info = payload.get("info")?;
+    if info.is_null() {
+        return None;
+    }
+
+    let total = parse_token_usage_breakdown(value_alias(
+        info,
+        "total_token_usage",
+        "totalTokenUsage",
+    )?)?;
+    let last = parse_token_usage_breakdown(value_alias(
+        info,
+        "last_token_usage",
+        "lastTokenUsage",
+    )?)?;
+    let model_context_window = value_alias(info, "model_context_window", "modelContextWindow")
+        .and_then(Value::as_i64);
+    let observed_at = value
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.timestamp());
+
+    Some(CompanionTokenUsage {
+        total,
+        last,
+        model_context_window,
+        observed_at,
+    })
+}
+
+fn parse_token_usage_breakdown(value: &Value) -> Option<CompanionTokenUsageBreakdown> {
+    value.as_object()?;
+    Some(CompanionTokenUsageBreakdown {
+        total_tokens: integer_alias(value, "total_tokens", "totalTokens"),
+        input_tokens: integer_alias(value, "input_tokens", "inputTokens"),
+        cached_input_tokens: integer_alias(value, "cached_input_tokens", "cachedInputTokens"),
+        cache_write_input_tokens: integer_alias(
+            value,
+            "cache_write_input_tokens",
+            "cacheWriteInputTokens",
+        ),
+        output_tokens: integer_alias(value, "output_tokens", "outputTokens"),
+        reasoning_output_tokens: integer_alias(
+            value,
+            "reasoning_output_tokens",
+            "reasoningOutputTokens",
+        ),
+    })
+}
+
+fn value_alias<'a>(value: &'a Value, snake_case: &str, camel_case: &str) -> Option<&'a Value> {
+    value.get(snake_case).or_else(|| value.get(camel_case))
+}
+
+fn integer_alias(value: &Value, snake_case: &str, camel_case: &str) -> i64 {
+    value_alias(value, snake_case, camel_case)
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
 }
 
 fn parse_turn(value: &Value) -> Result<TurnObservation> {
@@ -777,6 +941,7 @@ fn telemetry_from(thread: &ThreadObservation) -> CompanionTelemetry {
         }
     }
 
+    telemetry.token_usage = thread.token_usage.clone();
     telemetry
 }
 
@@ -1049,7 +1214,8 @@ fn record_companion_state(root: &Path, kind: &str, detail: &str, risk: Option<St
 mod tests {
     use super::{
         CompanionTelemetry, ItemObservation, ThreadObservation, TurnObservation, event_suffix,
-        parse_item, source_label, telemetry_from, telemetry_summary, tool_phase,
+        parse_item, parse_persisted_token_usage, source_label, telemetry_from, telemetry_summary,
+        tool_phase,
     };
 
     fn item(kind: &str, status: &str, detail: &str) -> ItemObservation {
@@ -1105,6 +1271,79 @@ mod tests {
     }
 
     #[test]
+    fn parses_persisted_token_count_event() {
+        let value = serde_json::json!({
+            "timestamp": "2026-08-20T08:30:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "total_tokens": 150,
+                        "input_tokens": 120,
+                        "cached_input_tokens": 20,
+                        "cache_write_input_tokens": 4,
+                        "output_tokens": 30,
+                        "reasoning_output_tokens": 10
+                    },
+                    "last_token_usage": {
+                        "total_tokens": 90,
+                        "input_tokens": 70,
+                        "cached_input_tokens": 10,
+                        "cache_write_input_tokens": 2,
+                        "output_tokens": 20,
+                        "reasoning_output_tokens": 5
+                    },
+                    "model_context_window": 200000
+                },
+                "rate_limits": null
+            }
+        });
+
+        let usage = parse_persisted_token_usage(&value).expect("token usage");
+        assert_eq!(usage.total.total_tokens, 150);
+        assert_eq!(usage.total.cached_input_tokens, 20);
+        assert_eq!(usage.last.input_tokens, 70);
+        assert_eq!(usage.last.reasoning_output_tokens, 5);
+        assert_eq!(usage.model_context_window, Some(200_000));
+        assert_eq!(usage.observed_at, Some(1_787_214_600));
+    }
+
+    #[test]
+    fn parses_camel_case_token_usage_aliases() {
+        let value = serde_json::json!({
+            "timestamp": "2026-08-20T08:30:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "totalTokenUsage": {
+                        "totalTokens": 150,
+                        "inputTokens": 120,
+                        "cachedInputTokens": 20,
+                        "cacheWriteInputTokens": 4,
+                        "outputTokens": 30,
+                        "reasoningOutputTokens": 10
+                    },
+                    "lastTokenUsage": {
+                        "totalTokens": 90,
+                        "inputTokens": 70,
+                        "cachedInputTokens": 10,
+                        "outputTokens": 20,
+                        "reasoningOutputTokens": 5
+                    },
+                    "modelContextWindow": 200000
+                }
+            }
+        });
+
+        let usage = parse_persisted_token_usage(&value).expect("token usage");
+        assert_eq!(usage.total.cache_write_input_tokens, 4);
+        assert_eq!(usage.last.cached_input_tokens, 10);
+        assert_eq!(usage.model_context_window, Some(200_000));
+    }
+
+    #[test]
     fn aggregates_efficiency_telemetry() {
         let thread = ThreadObservation {
             id: "thread-1".to_owned(),
@@ -1114,6 +1353,7 @@ mod tests {
             source: "vscode".to_owned(),
             created_at: 1,
             updated_at: 20,
+            token_usage: None,
             turns: vec![TurnObservation {
                 id: "turn-1".to_owned(),
                 status: "completed".to_owned(),
