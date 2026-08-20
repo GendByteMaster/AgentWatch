@@ -764,7 +764,11 @@ fn telemetry_from(thread: &ThreadObservation) -> CompanionTelemetry {
                 _ => {}
             }
 
-            for detail in item.details.iter().filter(|detail| !detail.trim().is_empty()) {
+            for detail in item
+                .details
+                .iter()
+                .filter(|detail| !detail.trim().is_empty())
+            {
                 let key = format!("{}:{}", item.kind, detail.trim().to_ascii_lowercase());
                 if !seen.insert(key) {
                     telemetry.repeated_items += 1;
