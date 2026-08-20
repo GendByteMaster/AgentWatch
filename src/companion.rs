@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -47,6 +47,8 @@ pub struct CompanionThread {
     pub updated_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_turn: Option<CompanionTurn>,
+    #[serde(default)]
+    pub telemetry: CompanionTelemetry,
     pub recent_items: Vec<CompanionItem>,
 }
 
@@ -58,6 +60,24 @@ pub struct CompanionTurn {
     pub completed_at: Option<i64>,
     pub duration_ms: Option<u64>,
     pub item_count: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompanionTelemetry {
+    pub total_items: usize,
+    pub tool_calls: usize,
+    pub failed_items: usize,
+    pub repeated_items: usize,
+    pub shell_calls: usize,
+    pub file_changes: usize,
+    pub mcp_calls: usize,
+    pub web_searches: usize,
+    pub subagent_calls: usize,
+    pub compactions: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_compaction_at: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_compaction_turn: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,7 +430,11 @@ fn emit_item_events(
     item: &ItemObservation,
 ) -> Result<()> {
     let phase = tool_phase(&item.status);
-    let kind = format!("tool.{}.{}", item.kind, phase);
+    let kind = if item.kind == "compaction" {
+        format!("codex.compaction.{phase}")
+    } else {
+        format!("tool.{}.{phase}", item.kind)
+    };
     let run_id = turn_run_id(&thread.id, &turn.id);
     let details = if item.details.is_empty() {
         vec![item.id.as_str()]
@@ -518,11 +542,7 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
         "commandExecution" => Some(ItemObservation {
             id,
             kind: "shell".to_owned(),
-            status: value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            status: item_status(value),
             details: vec![
                 value
                     .get("command")
@@ -538,11 +558,7 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
         "fileChange" => Some(ItemObservation {
             id,
             kind: "file".to_owned(),
-            status: value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            status: item_status(value),
             details: value
                 .get("changes")
                 .and_then(Value::as_array)
@@ -556,11 +572,7 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
         "mcpToolCall" => Some(ItemObservation {
             id,
             kind: "mcp".to_owned(),
-            status: value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            status: item_status(value),
             details: vec![format!(
                 "{}/{}",
                 value.get("server").and_then(Value::as_str).unwrap_or("mcp"),
@@ -571,11 +583,7 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
         "dynamicToolCall" => Some(ItemObservation {
             id,
             kind: "dynamic".to_owned(),
-            status: value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            status: item_status(value),
             details: vec![match value.get("namespace").and_then(Value::as_str) {
                 Some(namespace) => format!(
                     "{namespace}/{}",
@@ -592,16 +600,26 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
         "collabAgentToolCall" => Some(ItemObservation {
             id,
             kind: "agent".to_owned(),
-            status: value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown")
-                .to_owned(),
+            status: item_status(value),
             details: vec![
                 value
                     .get("tool")
                     .and_then(Value::as_str)
                     .unwrap_or("agent")
+                    .to_owned(),
+            ],
+            exit_code: None,
+        }),
+        "subAgentActivity" => Some(ItemObservation {
+            id,
+            kind: "agent".to_owned(),
+            status: "completed".to_owned(),
+            details: vec![
+                value
+                    .get("agentPath")
+                    .and_then(Value::as_str)
+                    .or_else(|| value.get("agentThreadId").and_then(Value::as_str))
+                    .unwrap_or("subagent")
                     .to_owned(),
             ],
             exit_code: None,
@@ -619,8 +637,23 @@ fn parse_item(value: &Value) -> Option<ItemObservation> {
             ],
             exit_code: None,
         }),
+        "contextCompaction" => Some(ItemObservation {
+            id,
+            kind: "compaction".to_owned(),
+            status: "completed".to_owned(),
+            details: vec!["context compaction".to_owned()],
+            exit_code: None,
+        }),
         _ => None,
     }
+}
+
+fn item_status(value: &Value) -> String {
+    value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_owned()
 }
 
 fn snapshot_from(
@@ -642,53 +675,128 @@ fn snapshot_threads<'a>(
 ) -> Vec<CompanionThread> {
     let mut threads = observations
         .into_iter()
-        .map(|thread| {
-            let latest_turn = thread.turns.last().map(|turn| CompanionTurn {
-                id: turn.id.clone(),
-                status: turn.status.clone(),
-                started_at: turn.started_at,
-                completed_at: turn.completed_at,
-                duration_ms: turn.duration_ms,
-                item_count: turn.items.len(),
-            });
-            let recent_items = thread
-                .turns
-                .iter()
-                .rev()
-                .flat_map(|turn| turn.items.iter().rev())
-                .flat_map(|item| {
-                    let status = item.status.clone();
-                    let kind = item.kind.clone();
-                    let fallback = item.id.clone();
-                    let details = if item.details.is_empty() {
-                        vec![fallback]
-                    } else {
-                        item.details.clone()
-                    };
-                    details.into_iter().map(move |detail| CompanionItem {
-                        kind: kind.clone(),
-                        status: status.clone(),
-                        detail: redaction::redact(&detail),
-                    })
-                })
-                .take(RECENT_ITEMS_PER_THREAD)
-                .collect();
-
-            CompanionThread {
-                id: thread.id.clone(),
-                name: thread.name.as_deref().map(redaction::redact),
-                preview: redaction::redact(&thread.preview),
-                status: thread.status.clone(),
-                source: thread.source.clone(),
-                created_at: thread.created_at,
-                updated_at: thread.updated_at,
-                latest_turn,
-                recent_items,
-            }
-        })
+        .map(snapshot_thread)
         .collect::<Vec<_>>();
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
     threads
+}
+
+fn snapshot_thread(thread: &ThreadObservation) -> CompanionThread {
+    let telemetry = telemetry_from(thread);
+    let latest_turn = thread.turns.last().map(|turn| CompanionTurn {
+        id: turn.id.clone(),
+        status: turn.status.clone(),
+        started_at: turn.started_at,
+        completed_at: turn.completed_at,
+        duration_ms: turn.duration_ms,
+        item_count: turn.items.len(),
+    });
+
+    let mut recent_items = Vec::with_capacity(RECENT_ITEMS_PER_THREAD);
+    recent_items.push(CompanionItem {
+        kind: "telemetry".to_owned(),
+        status: "observed".to_owned(),
+        detail: telemetry_summary(&telemetry),
+    });
+    recent_items.extend(
+        thread
+            .turns
+            .iter()
+            .rev()
+            .flat_map(|turn| turn.items.iter().rev())
+            .flat_map(|item| {
+                let status = item.status.clone();
+                let kind = item.kind.clone();
+                let fallback = item.id.clone();
+                let details = if item.details.is_empty() {
+                    vec![fallback]
+                } else {
+                    item.details.clone()
+                };
+                details.into_iter().map(move |detail| CompanionItem {
+                    kind: kind.clone(),
+                    status: status.clone(),
+                    detail: redaction::redact(&detail),
+                })
+            })
+            .take(RECENT_ITEMS_PER_THREAD.saturating_sub(1)),
+    );
+
+    CompanionThread {
+        id: thread.id.clone(),
+        name: thread.name.as_deref().map(redaction::redact),
+        preview: redaction::redact(&thread.preview),
+        status: thread.status.clone(),
+        source: thread.source.clone(),
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
+        latest_turn,
+        telemetry,
+        recent_items,
+    }
+}
+
+fn telemetry_from(thread: &ThreadObservation) -> CompanionTelemetry {
+    let mut telemetry = CompanionTelemetry::default();
+    let mut seen = HashSet::new();
+
+    for turn in &thread.turns {
+        for item in &turn.items {
+            telemetry.total_items += 1;
+            if item.kind != "compaction" {
+                telemetry.tool_calls += 1;
+            }
+            if item_failed(item) {
+                telemetry.failed_items += 1;
+            }
+
+            match item.kind.as_str() {
+                "shell" => telemetry.shell_calls += 1,
+                "file" => telemetry.file_changes += 1,
+                "mcp" => telemetry.mcp_calls += 1,
+                "web" => telemetry.web_searches += 1,
+                "agent" => telemetry.subagent_calls += 1,
+                "compaction" => {
+                    telemetry.compactions += 1;
+                    telemetry.last_compaction_turn = Some(turn.id.clone());
+                    telemetry.last_compaction_at = turn.completed_at.or(turn.started_at);
+                }
+                _ => {}
+            }
+
+            for detail in item
+                .details
+                .iter()
+                .filter(|detail| !detail.trim().is_empty())
+            {
+                let key = format!("{}:{}", item.kind, detail.trim().to_ascii_lowercase());
+                if !seen.insert(key) {
+                    telemetry.repeated_items += 1;
+                }
+            }
+        }
+    }
+
+    telemetry
+}
+
+fn telemetry_summary(telemetry: &CompanionTelemetry) -> String {
+    format!(
+        "tools={} failed={} repeated={} agents={} compactions={}",
+        telemetry.tool_calls,
+        telemetry.failed_items,
+        telemetry.repeated_items,
+        telemetry.subagent_calls,
+        telemetry.compactions
+    )
+}
+
+fn item_failed(item: &ItemObservation) -> bool {
+    item.exit_code.is_some_and(|code| code != 0)
+        || matches!(
+            item.status.as_str(),
+            "failed" | "interrupted" | "declined" | "cancelled" | "canceled"
+        )
 }
 
 fn persist_snapshot(root: &Path, snapshot: &CompanionSnapshot) -> Result<()> {
@@ -939,7 +1047,20 @@ fn record_companion_state(root: &Path, kind: &str, detail: &str, risk: Option<St
 
 #[cfg(test)]
 mod tests {
-    use super::{event_suffix, parse_item, source_label, tool_phase};
+    use super::{
+        CompanionTelemetry, ItemObservation, ThreadObservation, TurnObservation, event_suffix,
+        parse_item, source_label, telemetry_from, telemetry_summary, tool_phase,
+    };
+
+    fn item(kind: &str, status: &str, detail: &str) -> ItemObservation {
+        ItemObservation {
+            id: format!("{kind}-{detail}"),
+            kind: kind.to_owned(),
+            status: status.to_owned(),
+            details: vec![detail.to_owned()],
+            exit_code: None,
+        }
+    }
 
     #[test]
     fn normalizes_camel_case_event_suffixes() {
@@ -957,7 +1078,7 @@ mod tests {
 
     #[test]
     fn parses_command_item_without_output_body() {
-        let item = serde_json::json!({
+        let value = serde_json::json!({
             "type": "commandExecution",
             "id": "cmd-1",
             "command": "cargo test",
@@ -965,10 +1086,67 @@ mod tests {
             "exitCode": 0,
             "aggregatedOutput": "secret output that should not be mirrored here"
         });
-        let parsed = parse_item(&item).expect("command item");
+        let parsed = parse_item(&value).expect("command item");
         assert_eq!(parsed.kind, "shell");
         assert_eq!(parsed.details, ["cargo test"]);
         assert_eq!(parsed.exit_code, Some(0));
+    }
+
+    #[test]
+    fn parses_context_compaction_as_observable_item() {
+        let value = serde_json::json!({
+            "type": "contextCompaction",
+            "id": "compact-1"
+        });
+        let parsed = parse_item(&value).expect("compaction item");
+        assert_eq!(parsed.kind, "compaction");
+        assert_eq!(parsed.status, "completed");
+        assert_eq!(parsed.details, ["context compaction"]);
+    }
+
+    #[test]
+    fn aggregates_efficiency_telemetry() {
+        let thread = ThreadObservation {
+            id: "thread-1".to_owned(),
+            name: None,
+            preview: String::new(),
+            status: "idle".to_owned(),
+            source: "vscode".to_owned(),
+            created_at: 1,
+            updated_at: 20,
+            turns: vec![TurnObservation {
+                id: "turn-1".to_owned(),
+                status: "completed".to_owned(),
+                started_at: Some(10),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+                items: vec![
+                    item("shell", "completed", "cargo test"),
+                    item("shell", "completed", "cargo test"),
+                    item("agent", "completed", "spawn"),
+                    item("compaction", "completed", "context compaction"),
+                ],
+            }],
+        };
+
+        let telemetry = telemetry_from(&thread);
+        assert_eq!(telemetry.total_items, 4);
+        assert_eq!(telemetry.tool_calls, 3);
+        assert_eq!(telemetry.shell_calls, 2);
+        assert_eq!(telemetry.subagent_calls, 1);
+        assert_eq!(telemetry.compactions, 1);
+        assert_eq!(telemetry.repeated_items, 1);
+        assert_eq!(telemetry.last_compaction_at, Some(20));
+        assert_eq!(telemetry.last_compaction_turn.as_deref(), Some("turn-1"));
+        assert_eq!(
+            telemetry_summary(&telemetry),
+            "tools=3 failed=0 repeated=1 agents=1 compactions=1"
+        );
+    }
+
+    #[test]
+    fn telemetry_defaults_keep_old_snapshots_compatible() {
+        assert_eq!(CompanionTelemetry::default(), CompanionTelemetry::default());
     }
 
     #[test]
