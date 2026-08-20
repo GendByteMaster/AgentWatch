@@ -121,7 +121,11 @@ fn validate_request_params(method: CompanionRequestMethod, params: &Value) -> Re
         CompanionRequestMethod::Initialize => {
             require_only_keys(params, &["clientInfo"], method.as_str())?;
             if let Some(client_info) = params.get("clientInfo") {
-                require_only_keys(client_info, &["name", "title", "version"], "initialize.clientInfo")?;
+                require_only_keys(
+                    client_info,
+                    &["name", "title", "version"],
+                    "initialize.clientInfo",
+                )?;
             }
         }
         CompanionRequestMethod::ThreadList => require_only_keys(
@@ -158,9 +162,7 @@ fn require_only_keys(value: &Value, allowed: &[&str], context: &str) -> Result<(
         .with_context(|| format!("Account Safety Guard expected object params for `{context}`"))?;
     for key in object.keys() {
         if !allowed.contains(&key.as_str()) {
-            bail!(
-                "Account Safety Guard refused unexpected `{key}` parameter in `{context}`"
-            );
+            bail!("Account Safety Guard refused unexpected `{key}` parameter in `{context}`");
         }
     }
     Ok(())
@@ -235,7 +237,10 @@ mod tests {
         assert_eq!(CompanionRequestMethod::Initialize.as_str(), "initialize");
         assert_eq!(CompanionRequestMethod::ThreadList.as_str(), "thread/list");
         assert_eq!(CompanionRequestMethod::ThreadRead.as_str(), "thread/read");
-        assert_eq!(CompanionNotificationMethod::Initialized.as_str(), "initialized");
+        assert_eq!(
+            CompanionNotificationMethod::Initialized.as_str(),
+            "initialized"
+        );
     }
 
     #[test]
