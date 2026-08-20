@@ -20,6 +20,7 @@ mod windows {
         collections::BTreeSet,
         env,
         ffi::OsString,
+        fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
     };
@@ -27,6 +28,7 @@ mod windows {
     use anyhow::{Context, Result, bail};
 
     const CODEX_OVERRIDE: &str = "AGENTWATCH_CODEX_BIN";
+    const CODEX_CLI_PATH: &str = "CODEX_CLI_PATH";
 
     pub(super) fn prepare_environment() -> Result<Option<PathBuf>> {
         if let Some(path) = explicit_override()? {
@@ -41,6 +43,18 @@ mod windows {
         let mut npm_roots = BTreeSet::new();
 
         candidates.extend(where_paths("codex.exe"));
+
+        if let Some(path) = env::var_os(CODEX_CLI_PATH) {
+            candidates.push(PathBuf::from(path));
+        }
+
+        if let Some(local_appdata) = env::var_os("LOCALAPPDATA") {
+            let root = PathBuf::from(local_appdata)
+                .join("OpenAI")
+                .join("Codex")
+                .join("bin");
+            candidates.extend(local_codex_candidates(&root));
+        }
 
         for path in where_paths("codex") {
             if let Some(parent) = path.parent() {
@@ -164,6 +178,27 @@ mod windows {
             .collect()
     }
 
+    fn local_codex_candidates(root: &Path) -> Vec<PathBuf> {
+        let mut candidates = vec![root.join("codex.exe")];
+
+        if let Ok(entries) = fs::read_dir(root) {
+            candidates.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .map(|path| path.join("codex.exe")),
+            );
+        }
+
+        // Codex Desktop cache directories are content/version hashed. Prefer the most
+        // recently updated executable, while still probing every candidate before use.
+        candidates.sort_by_key(|path| {
+            std::cmp::Reverse(path.metadata().and_then(|meta| meta.modified()).ok())
+        });
+        candidates
+    }
+
     fn npm_native_candidates(root: &Path) -> Vec<PathBuf> {
         let Some((package, triple)) = windows_package() else {
             return Vec::new();
@@ -235,7 +270,9 @@ mod windows {
 
     #[cfg(test)]
     mod tests {
-        use super::{is_protected_windows_apps_binary, npm_native_candidates};
+        use super::{
+            is_protected_windows_apps_binary, local_codex_candidates, npm_native_candidates,
+        };
         use std::path::Path;
 
         #[test]
@@ -246,6 +283,16 @@ mod windows {
                 rendered.contains("@openai")
                     && rendered.contains("codex-win32")
                     && rendered.ends_with(r"bin\codex.exe")
+            }));
+        }
+
+        #[test]
+        fn local_codex_cache_includes_direct_binary_candidate() {
+            let root = Path::new(r"C:\Users\dev\AppData\Local\OpenAI\Codex\bin");
+            let candidates = local_codex_candidates(root);
+            assert!(candidates.iter().any(|path| {
+                path.to_string_lossy()
+                    .ends_with(r"OpenAI\Codex\bin\codex.exe")
             }));
         }
 
